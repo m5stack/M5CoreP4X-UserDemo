@@ -1,0 +1,7 @@
+# Name,   Type, SubType, Offset,  Size, Flags
+# The 45-second PCM is embedded in the user-demo application image.
+# Keep SPIFFS storage for web assets and recordings.
+nvs,      data, nvs,     ,        0x6000,
+phy_init, data, phy,     ,        0x1000,
+factory,  app,  factory, ,        12M,
+storage,  data, spiffs,  ,        3M,

@@ -1,0 +1,17 @@
+version: 1.4.0
+url: https://github.com/espressif/esp-wifi-remote
+description: Utility wrapper for esp_wifi functionality on remote targets
+dependencies:
+  idf:
+    version: '>=5.3'
+  # Use local esp-hosted-mcu instead of registry version to avoid duplicate symbols
+  # espressif/esp_hosted:
+  #   version: '>=2.11'
+  #   rules:
+  #   - if: "target in [esp32h2, esp32p4]"
+  espressif/wifi_remote_over_eppp:
+    version: '>=0.1'
+    # TODO: Uncomment this once conditional dependencies are supported
+    # matches:
+    #   - if: "idf_version <5.5"
+    #   - if: "$CONFIG{ESP_WIFI_REMOTE_LIBRARY_EPPP} == True"

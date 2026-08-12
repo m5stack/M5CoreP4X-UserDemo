@@ -1,0 +1,39 @@
+dependencies:
+  cmake_utilities:
+    dependencies: []
+    source:
+      path: D:\work\m5_project\295_Stamp-Timer-Power2\p295_pm1_reg_test_idf551\components\m5_py32bin_tools\examples\esp-idf\pm1_update_firmware_with_idf551\components\cmake_utilities
+      type: local
+    version: 1.1.1
+  espressif/i2c_bus:
+    dependencies:
+    - name: espressif/cmake_utilities
+      version: '*'
+    - name: idf
+      version: '>=4.0'
+    source:
+      path: D:\work\m5_project\295_Stamp-Timer-Power2\p295_pm1_reg_test_idf551\components\m5_py32bin_tools\examples\esp-idf\pm1_update_firmware_with_idf551\components\i2c_bus
+      type: local
+    version: 1.5.0
+  idf:
+    source:
+      type: idf
+    version: 5.5.1
+  m5_py32bin_tools:
+    dependencies:
+    - name: espressif/i2c_bus
+      version: ^1.0.0
+    - name: idf
+      version: '>=5.1.0'
+    source:
+      path: D:\work\m5_project\295_Stamp-Timer-Power2\p295_pm1_reg_test_idf551\components\m5_py32bin_tools
+      type: local
+    version: 0.1.0
+direct_dependencies:
+- espressif/cmake_utilities
+- espressif/i2c_bus
+- idf
+- m5_py32bin_tools
+manifest_hash: a74918aeb3e5ea8b34d57dcf6c7956488c9b9f27e61e995a4dcbf9362516cb0a
+target: esp32c61
+version: 2.0.0

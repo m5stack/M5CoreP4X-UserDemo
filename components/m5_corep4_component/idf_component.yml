@@ -1,0 +1,53 @@
+dependencies:
+
+
+  espressif/usb_host_hid: "^1.2.0"
+  
+  espressif/esp_lvgl_port: ^2.7.2
+
+  esp_lcd_touch:
+    public: true
+    version: ^1.1.0
+  # esp_lcd:
+  #   public: true
+  #   version: ^1.1.0
+
+  esp_lcd_st7102:
+    path: ./third_party_component/esp_lcd_st7102
+    public: true
+
+  esp_lcd_touch_cst3xx:
+    path: ./third_party_component/esp_lcd_touch_cst3xx
+    public: true
+
+  p4_ethernet_init:
+    path: ./third_party_component/p4_ethernet_init
+    public: true
+
+  usb_host_uvc:
+    path: ./third_party_component/usb_host_uvc
+    public: true
+
+  uvc_web_server:
+    path: ./third_party_component/uvc_web_server
+    public: true
+
+  esp-hosted-mcu:
+    path: ./third_party_component/esp-hosted-mcu
+    public: true
+
+  esp_wifi_remote:
+    path: ./third_party_component/esp_wifi_remote
+    public: true
+
+  usb_host_msc:
+    path: ./third_party_component/usb_host_msc
+    public: true
+
+  corep4_lvgl_ui_out:
+    path: ./corep4_lvgl_ui_out
+    public: true
+  
+    
+  idf: '>=5.3.0'
+ 

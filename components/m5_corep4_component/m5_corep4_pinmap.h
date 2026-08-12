@@ -1,0 +1,148 @@
+#ifndef __M5_COREP4_PINMAP_H__
+#define __M5_COREP4_PINMAP_H__
+
+#include "hal/gpio_types.h"
+#include <driver/i2c_types.h>
+
+// I2C 地址 定义
+#define I2C_ADDR_ES8311     0x18    // ES8311 音频编解码器
+#define I2C_ADDR_RTC        0x32    // RX8130CE 实时时钟芯片
+#define I2C_ADDR_ES7210     0x40    // ES7210 音频编解码器
+#define I2C_ADDR_CST3XX     0x58    // CST3XX 触摸 默认地址
+#define I2C_ADDR_BMI270     0x68    // BMI270 IMU 默认地址
+#define I2C_ADDR_PM1        0x6E    // PM1 默认地址
+#define I2C_ADDR_PYB        0xFF    // PY32 IO Expander 默认地址
+
+// PYB 控制 电源类引脚
+#define Pin_PYB_TP_RST          M5IOE1_PIN_8
+#define Pin_PYB_LCD_RST         M5IOE1_PIN_11
+#define Pin_PYB_LCD_BL_PWM      M5IOE1_PIN_9
+#define Pin_PYB_LCD_PWR_EN      M5IOE1_PIN_10
+
+#define Pin_PYB_GROVE_PWR_EN    M5IOE1_PIN_5
+#define Pin_PYB_P4USBC_OUT_EN   M5IOE1_PIN_4
+#define Pin_PYB_USBA_OUT_EN     M5IOE1_PIN_2
+
+#define Pin_PYB_AU_PWR_EN       M5IOE1_PIN_1
+#define Pin_PYB_SPK_PWR_EN      M5IOE1_PIN_3
+#define Pin_PY_CHG_STAT         M5IOE1_PIN_6
+#define Pin_PYB_SD_DECT         M5IOE1_PIN_13
+#define Pin_PYB_L3B_EN          M5IOE1_PIN_12
+
+// USB-C Slave 相关
+#define COREP4_USB_SLAVE_POWER_EN  M5IOE1_PIN_4
+#define COREP4_USB_SLAVE_DATA_DP  GPIO_NUM_25
+#define COREP4_USB_SLAVE_DATA_DM  GPIO_NUM_24
+
+// USB-A 2.0 HOST 相关
+#define COREP4_USB_HOST_POWER_EN  M5IOE1_PIN_2
+
+
+// CoreP4 <-> STP2 引脚
+#define Pin_P4_PMIC_IRQ GPIO_NUM_0
+
+// PMIC 引脚
+#define PYG0_IMU_INT        M5PM1_GPIO_NUM_0
+#define PYG1_CHG_PROG       M5PM1_GPIO_NUM_1
+#define PYG2_IRQ            M5PM1_GPIO_NUM_2
+// G3 NC
+#define PYG4_RTC_INT        M5PM1_GPIO_NUM_4
+
+// CoreP4 I2C 引脚
+#define Pin_COREP4_INTERNAL_I2C_SCL GPIO_NUM_9
+#define Pin_COREP4_INTERNAL_I2C_SDA GPIO_NUM_11
+#define Pin_COREP4_EXTERNAL_I2C_SCL GPIO_NUM_16
+#define Pin_COREP4_EXTERNAL_I2C_SDA GPIO_NUM_18
+#define COREP4_INTERNAL_I2C_PORT I2C_NUM_0
+#define COREP4_INTERNAL_I2C_FREQ_HZ 400000
+#define COREP4_EXTERNAL_I2C_PORT I2C_NUM_1
+#define COREP4_EXTERNAL_I2C_FREQ_HZ 400000
+
+// CoreP4 M5MUS 引脚
+#define COREP4_M5BUS_P2 GPIO_NUM_17
+#define COREP4_M5BUS_P4 GPIO_NUM_20
+#define COREP4_M5BUS_P6 "CHIP_EN"
+#define COREP4_M5BUS_P8 GPIO_NUM_21
+#define COREP4_M5BUS_P10 GPIO_NUM_22
+#define COREP4_M5BUS_P12 "P4_3V3_L3B"
+#define COREP4_M5BUS_P14 GPIO_NUM_37
+#define COREP4_M5BUS_P16 GPIO_NUM_14
+#define COREP4_M5BUS_P18 GPIO_NUM_9
+#define COREP4_M5BUS_P20 GPIO_NUM_16
+#define COREP4_M5BUS_P22 GPIO_NUM_12
+#define COREP4_M5BUS_P24 GPIO_NUM_23
+#define COREP4_M5BUS_P26 GPIO_NUM_19
+#define COREP4_M5BUS_P28 "5V_INOUT"
+#define COREP4_M5BUS_P30 "VBAT"
+
+#define COREP4_M5BUS_P1 "GND"
+#define COREP4_M5BUS_P3 "GND"
+#define COREP4_M5BUS_P5 "GND"
+#define COREP4_M5BUS_P7 GPIO_NUM_7
+#define COREP4_M5BUS_P9 GPIO_NUM_8
+#define COREP4_M5BUS_P11 GPIO_NUM_10
+#define COREP4_M5BUS_P13 GPIO_NUM_38
+#define COREP4_M5BUS_P15 GPIO_NUM_15
+#define COREP4_M5BUS_P17 GPIO_NUM_11
+#define COREP4_M5BUS_P19 GPIO_NUM_18
+#define COREP4_M5BUS_P21 GPIO_NUM_39
+#define COREP4_M5BUS_P23 GPIO_NUM_34
+#define COREP4_M5BUS_P25 "HPWR"
+#define COREP4_M5BUS_P27 "HPWR"
+#define COREP4_M5BUS_P29 "HPWR"
+
+// CoreP4 RMII 引脚
+#define Pin_P4_RMII_CLK GPIO_NUM_32
+#define Pin_P4_RMII_MDIO GPIO_NUM_36
+#define Pin_P4_RMII_TXD1 GPIO_NUM_35
+#define Pin_P4_RMII_TXD0 GPIO_NUM_41
+#define Pin_P4_RMII_TXEN GPIO_NUM_33
+#define Pin_P4_RMII_MDC GPIO_NUM_31
+#define Pin_P4_RMII_RXDV GPIO_NUM_28
+#define Pin_P4_RMII_RXD0 GPIO_NUM_29
+#define Pin_P4_RMII_RXD1 GPIO_NUM_30
+#define Pin_P4_RMII_RST GPIO_NUM_52
+
+// CoreP4 IR 引脚
+#define Pin_P4_IR_RX GPIO_NUM_13
+#define Pin_P4_IR_TX GPIO_NUM_49
+#define Pin_P4_IR_EN GPIO_NUM_NC
+
+//TOUCH INT 引脚
+// CST3XX INT → GPIO1（LP GPIO，RTCIO_CHANNEL_1）。
+// CST3XX 始终有电（功耗仪验证），深度睡眠期间可产生 INT 脉冲，触摸唤醒路径可用。
+// 深度睡眠前须通过 rtc_gpio_pullup_en 配置 LP 上拉，见 enter_deep_sleep()。
+#define Pin_P4_TP_INT GPIO_NUM_1
+
+//I2S 引脚
+#define Pin_P4_I2S_BCLK_PIN      GPIO_NUM_6
+#define Pin_P4_I2S_MCLK_PIN      GPIO_NUM_2
+#define Pin_P4_I2S_DATA_IN_PIN   GPIO_NUM_3
+#define Pin_P4_I2S_DATA_OUT_PIN  GPIO_NUM_5
+#define Pin_P4_I2S_DATA_WS_PIN   GPIO_NUM_4
+#define Pin_P4_I2S_PWR_EN       GPIO_NUM_NC
+
+// SD 卡 引脚 MMC 模式
+#define Pin_P4_SD_MMC_CMD GPIO_NUM_7
+#define Pin_P4_SD_MMC_CLK GPIO_NUM_10
+#define Pin_P4_SD_MMC_D0  GPIO_NUM_8
+
+// SD 卡 引脚 SPI 模式
+#define Pin_P4_SD_SPI_CS   GPIO_NUM_50
+#define Pin_P4_SD_SPI_MOSI GPIO_NUM_7
+#define Pin_P4_SD_SPI_MISO GPIO_NUM_8
+#define Pin_P4_SD_SPI_CLK  GPIO_NUM_10
+
+// Stamp-P4 ESP32C6 WiFi 模块
+#define Pin_P4_WIFI_SD2_D3 GPIO_NUM_48
+#define Pin_P4_WIFI_SD2_D2 GPIO_NUM_47
+#define Pin_P4_WIFI_SD2_D1 GPIO_NUM_46
+#define Pin_P4_WIFI_SD2_D0 GPIO_NUM_45
+#define Pin_P4_WIFI_SD2_CMD GPIO_NUM_44
+#define Pin_P4_WIFI_SD2_CLK GPIO_NUM_43
+#define Pin_P4_WIFI_WAKE GPIO_NUM_40
+#define Pin_P4_WIFI_RESET GPIO_NUM_42
+#define Pin_P4_WIFI_SDA GPIO_NUM_11
+#define Pin_P4_WIFI_SCL GPIO_NUM_9
+
+#endif // __M5_COREP4_PINMAP_H__

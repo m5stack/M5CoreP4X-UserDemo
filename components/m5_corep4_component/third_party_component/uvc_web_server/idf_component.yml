@@ -1,0 +1,6 @@
+dependencies:
+  usb_host_uvc:
+    path: ../usb_host_uvc
+    public: true
+
+  idf: '>=4.4.2'

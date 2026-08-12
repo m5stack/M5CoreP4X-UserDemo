@@ -1,0 +1,6 @@
+[submodule "components/M5PM1"]
+	path = components/M5PM1
+	url = https://github.com/m5stack/M5PM1.git
+[submodule "components/M5IOE1"]
+	path = components/M5IOE1
+	url = https://github.com/m5stack/M5IOE1.git

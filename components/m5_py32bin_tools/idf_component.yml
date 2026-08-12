@@ -1,0 +1,22 @@
+version: "0.1.0"
+description: "Unified PY32BIN hardware abstraction for Arduino and ESP-IDF"
+url: https://m5stack.com
+repository: https://github.com/m5stack
+license: MIT
+maintainers:
+  - "M5Stack <support@m5stack.com>"
+tags:
+  - m5stack
+  - py32
+  - abstraction
+  - bus
+  - toolkit
+
+dependencies:
+  espressif/i2c_bus: "^1.0.0"
+  idf:
+    version: ">=5.1.0"
+
+build:
+  cmake_options:
+    - "COMPONENT_REQUIRES=driver;esp_common;esp_system;espressif__i2c_bus"

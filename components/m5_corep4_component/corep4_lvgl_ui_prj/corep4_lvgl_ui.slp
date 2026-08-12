@@ -1,0 +1,12 @@
+{
+    "uiExportFolderPath": "D:/work/m5_project/355_CoreP4/p355_corep4_hardware_test_demo_idf550/components/m5_corep4_component/corep4_lvgl_ui_out/corep4_lvgl_ui/./ui",
+    "projectExportFolderPath": "D:/work/m5_project/355_CoreP4/p355_corep4_hardware_test_demo_idf550/components/m5_corep4_component/corep4_lvgl_ui_out/corep4_lvgl_ui",
+    "drive_stdio": "-",
+    "drive_stdio_path": "",
+    "drive_posix": "-",
+    "drive_posix_path": "",
+    "drive_win32": "-",
+    "drive_win32_path": "",
+    "drive_fatfs": "-",
+    "drive_fatfs_path": ""
+}

@@ -36,8 +36,11 @@
 
 # Build files
 build/
+build-*/
 cmake-build-*/
 managed_components/
+/sdkconfig
+/sdkconfig.idf*
 
 # PlatformIO
 .pio/
