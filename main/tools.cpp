@@ -23,7 +23,7 @@
 #define APP_FW_NAME "M5CoreP4X-UserDemo"
 #endif
 #ifndef APP_FW_VERSION
-#define APP_FW_VERSION "V1.0-20260812"
+#define APP_FW_VERSION "V0.2-20260812"
 #endif
 #ifndef APP_FW_POWERED_BY
 #define APP_FW_POWERED_BY "Powered by onexs."
