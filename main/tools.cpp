@@ -36,7 +36,7 @@ static const char *TAG = "tools";
 
 namespace {
 
-int compile_month_to_number(const char* mon)
+int compile_month_to_number(const char *mon)
 {
     if (!mon) return 1;
     if (std::strcmp(mon, "Jan") == 0) return 1;
@@ -54,22 +54,22 @@ int compile_month_to_number(const char* mon)
     return 1;
 }
 
-bool firmware_compile_date_midnight(struct tm& out)
+bool firmware_compile_date_midnight(struct tm &out)
 {
     char mon[4] = {};
-    int day = 1;
-    int year = 2025;
+    int day     = 1;
+    int year    = 2025;
     if (std::sscanf(__DATE__, "%3s %d %d", mon, &day, &year) != 3) {
         return false;
     }
 
-    out = {};
-    out.tm_year = year - 1900;
-    out.tm_mon = compile_month_to_number(mon) - 1;
-    out.tm_mday = day;
-    out.tm_hour = 0;
-    out.tm_min = 0;
-    out.tm_sec = 0;
+    out          = {};
+    out.tm_year  = year - 1900;
+    out.tm_mon   = compile_month_to_number(mon) - 1;
+    out.tm_mday  = day;
+    out.tm_hour  = 0;
+    out.tm_min   = 0;
+    out.tm_sec   = 0;
     out.tm_isdst = -1;
 
     struct tm copy = out;
@@ -79,7 +79,7 @@ bool firmware_compile_date_midnight(struct tm& out)
     return true;
 }
 
-bool rtc_time_needs_restore(const struct tm& t)
+bool rtc_time_needs_restore(const struct tm &t)
 {
     const int year = t.tm_year + 1900;
     if (year == 2099 || year < 2020 || year > 2099) {
@@ -88,9 +88,7 @@ bool rtc_time_needs_restore(const struct tm& t)
     if (t.tm_mon < 0 || t.tm_mon > 11 || t.tm_mday < 1 || t.tm_mday > 31) {
         return true;
     }
-    if (t.tm_hour < 0 || t.tm_hour > 23 ||
-        t.tm_min < 0 || t.tm_min > 59 ||
-        t.tm_sec < 0 || t.tm_sec > 59) {
+    if (t.tm_hour < 0 || t.tm_hour > 23 || t.tm_min < 0 || t.tm_min > 59 || t.tm_sec < 0 || t.tm_sec > 59) {
         return true;
     }
     return false;
@@ -117,18 +115,18 @@ void ethernet_wait_task(void *arg)
 }
 
 struct StartupPromptSoundTaskContext {
-    m5_corep4_tool* tool;
+    m5_corep4_tool *tool;
     uint32_t delay_ms;
 };
 
-void play_startup_prompt_sound_now(m5_corep4_tool& tool)
+void play_startup_prompt_sound_now(m5_corep4_tool &tool)
 {
     if (!tool.get_startup_prompt_audio_enabled()) {
         ESP_LOGI(TAG, "Startup prompt sound disabled");
         return;
     }
 
-    auto* playback = tool.otool_tools.audio.get_playback();
+    auto *playback = tool.otool_tools.audio.get_playback();
     if (!playback) {
         ESP_LOGW(TAG, "Startup prompt sound skipped: playback is not ready");
         return;
@@ -139,9 +137,7 @@ void play_startup_prompt_sound_now(m5_corep4_tool& tool)
         return;
     }
 
-    esp_err_t ret = playback->play_audio_file(AUDIO_FILE_STARTUP_2CH_16K_16B_4S,
-                                              AUDIO_PLAYBACK_ASYNC,
-                                              0);
+    esp_err_t ret = playback->play_audio_file(AUDIO_FILE_STARTUP_2CH_16K_16B_4S, AUDIO_PLAYBACK_ASYNC, 0);
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "Startup prompt sound playback started");
     } else {
@@ -149,23 +145,21 @@ void play_startup_prompt_sound_now(m5_corep4_tool& tool)
     }
 }
 
-void startup_prompt_sound_task(void* arg)
+void startup_prompt_sound_task(void *arg)
 {
-    auto* ctx = static_cast<StartupPromptSoundTaskContext*>(arg);
+    auto *ctx = static_cast<StartupPromptSoundTaskContext *>(arg);
     if (!ctx || !ctx->tool) {
         std::free(ctx);
         vTaskDelete(nullptr);
         return;
     }
 
-    m5_corep4_tool* tool = ctx->tool;
-    uint32_t delay_ms = ctx->delay_ms;
+    m5_corep4_tool *tool = ctx->tool;
+    uint32_t delay_ms    = ctx->delay_ms;
     std::free(ctx);
 
     if (delay_ms > 0) {
-        ESP_LOGI(TAG,
-                 "Startup prompt sound delayed by %lu ms",
-                 static_cast<unsigned long>(delay_ms));
+        ESP_LOGI(TAG, "Startup prompt sound delayed by %lu ms", static_cast<unsigned long>(delay_ms));
         vTaskDelay(pdMS_TO_TICKS(delay_ms));
     }
 
@@ -175,74 +169,72 @@ void startup_prompt_sound_task(void* arg)
 
 /**
  * @brief USB Serial JTAG 写入回调函数
- * 
+ *
  * @param data 要写入的数据缓冲区
  * @param length 数据长度
  * @param timeout_ms 超时时间（毫秒）
  * @return esp_err_t ESP_OK 表示成功
  */
-esp_err_t usb_serial_jtag_write_callback(const uint8_t *data, size_t length, uint32_t timeout_ms) {
+esp_err_t usb_serial_jtag_write_callback(const uint8_t *data, size_t length, uint32_t timeout_ms)
+{
     if (data == nullptr || length == 0) {
         return ESP_OK;
     }
-    
-    uint32_t written = 0;
-    uint32_t start_tick = xTaskGetTickCount();
+
+    uint32_t written       = 0;
+    uint32_t start_tick    = xTaskGetTickCount();
     uint32_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
-    
+
     while (written < length) {
-        int result = usb_serial_jtag_write_bytes((const char *)(data + written), 
-                                                  length - written, 
-                                                  pdMS_TO_TICKS(100));
+        int result = usb_serial_jtag_write_bytes((const char *)(data + written), length - written, pdMS_TO_TICKS(100));
         if (result > 0) {
             written += result;
         }
-        
+
         // 检查超时
         if ((xTaskGetTickCount() - start_tick) > timeout_ticks) {
             ESP_LOGW(TAG, "USB-JTAG write timeout: written %lu/%zu bytes", written, length);
             return ESP_ERR_TIMEOUT;
         }
-        
+
         // 避免忙等待
         if (result <= 0) {
             vTaskDelay(pdMS_TO_TICKS(1));
         }
     }
-    
+
     return ESP_OK;
 }
 
 /**
  * @brief USB Serial JTAG 读取回调函数
- * 
+ *
  * @param data 接收数据的缓冲区
  * @param length 要读取的数据长度
  * @param timeout_ms 超时时间（毫秒）
  * @return esp_err_t ESP_OK 表示成功
  */
-esp_err_t usb_serial_jtag_read_callback(uint8_t *data, size_t length, uint32_t timeout_ms) {
+esp_err_t usb_serial_jtag_read_callback(uint8_t *data, size_t length, uint32_t timeout_ms)
+{
     if (data == nullptr || length == 0) {
         return ESP_OK;
     }
-    
-    uint32_t read_count = 0;
-    uint32_t start_tick = xTaskGetTickCount();
+
+    uint32_t read_count    = 0;
+    uint32_t start_tick    = xTaskGetTickCount();
     uint32_t timeout_ticks = pdMS_TO_TICKS(timeout_ms);
     uint32_t no_data_count = 0;  // 连续无数据计数
-    
+
     while (read_count < length) {
-        int result = usb_serial_jtag_read_bytes((char *)(data + read_count), 
-                                                length - read_count, 
-                                                pdMS_TO_TICKS(10));
+        int result = usb_serial_jtag_read_bytes((char *)(data + read_count), length - read_count, pdMS_TO_TICKS(10));
         if (result > 0) {
             read_count += result;
-            start_tick = xTaskGetTickCount();  // 读到数据后重置超时起点
-            no_data_count = 0;  // 重置无数据计数
+            start_tick    = xTaskGetTickCount();  // 读到数据后重置超时起点
+            no_data_count = 0;                    // 重置无数据计数
         } else {
             no_data_count++;
         }
-        
+
         // 检查总超时
         if ((xTaskGetTickCount() - start_tick) > timeout_ticks) {
             // 完全没读到数据是正常的，不输出日志（避免刷屏）
@@ -252,7 +244,7 @@ esp_err_t usb_serial_jtag_read_callback(uint8_t *data, size_t length, uint32_t t
             }
             return ESP_ERR_TIMEOUT;
         }
-        
+
         // 避免忙等待：连续多次无数据时增加延迟
         if (result <= 0) {
             if (no_data_count > 5) {
@@ -262,16 +254,17 @@ esp_err_t usb_serial_jtag_read_callback(uint8_t *data, size_t length, uint32_t t
             }
         }
     }
-    
+
     return ESP_OK;
 }
 
 /**
  * @brief USB Serial JTAG 可用数据量查询回调函数（可选）
- * 
+ *
  * @return size_t 可用字节数
  */
-size_t usb_serial_jtag_available_callback() {
+size_t usb_serial_jtag_available_callback()
+{
     // USB Serial JTAG 不提供直接的 available() 函数
     // 可以通过尝试读取来判断，这里返回 0 表示不支持
     return 0;
@@ -279,16 +272,16 @@ size_t usb_serial_jtag_available_callback() {
 
 }  // anonymous namespace
 
-void log_firmware_metadata(const char* tag)
+void log_firmware_metadata(const char *tag)
 {
-    const char* log_tag = tag ? tag : TAG;
+    const char *log_tag = tag ? tag : TAG;
     ESP_LOGI(log_tag, "Firmware: %s", APP_FW_NAME);
     ESP_LOGI(log_tag, "Version: %s", APP_FW_VERSION);
     ESP_LOGI(log_tag, "%s", APP_FW_POWERED_BY);
     ESP_LOGI(log_tag, "%s", APP_FW_SUPPORT_TEXT);
 }
 
-void repair_rtc_time_if_needed(m5_corep4_tool& tool)
+void repair_rtc_time_if_needed(m5_corep4_tool &tool)
 {
     struct tm current = {};
     tool.rtc.getTime(&current);
@@ -299,15 +292,8 @@ void repair_rtc_time_if_needed(m5_corep4_tool& tool)
             ESP_LOGW(TAG,
                      "RTC time is unreasonable (%04d-%02d-%02d %02d:%02d:%02d), "
                      "restoring to firmware date %04d-%02d-%02d 00:00:00",
-                     current.tm_year + 1900,
-                     current.tm_mon + 1,
-                     current.tm_mday,
-                     current.tm_hour,
-                     current.tm_min,
-                     current.tm_sec,
-                     restored.tm_year + 1900,
-                     restored.tm_mon + 1,
-                     restored.tm_mday);
+                     current.tm_year + 1900, current.tm_mon + 1, current.tm_mday, current.tm_hour, current.tm_min,
+                     current.tm_sec, restored.tm_year + 1900, restored.tm_mon + 1, restored.tm_mday);
             tool.rtc.setTime(&restored);
             current = restored;
         } else {
@@ -315,27 +301,22 @@ void repair_rtc_time_if_needed(m5_corep4_tool& tool)
         }
     }
 
-    if (auto* status = tool.get_device_status()) {
-        status->rtc.rtc_initialized = true;
+    if (auto *status = tool.get_device_status()) {
+        status->rtc.rtc_initialized   = true;
         status->rtc.timer_irq_enabled = false;
-        status->rtc.current_time = current;
+        status->rtc.current_time      = current;
     }
 }
 
-void start_ethernet_wait_task(m5_corep4_tool& tool)
+void start_ethernet_wait_task(m5_corep4_tool &tool)
 {
-    BaseType_t task_ret = xTaskCreate(ethernet_wait_task,
-                                      "eth_wait",
-                                      4096,
-                                      &tool,
-                                      5,
-                                      nullptr);
+    BaseType_t task_ret = xTaskCreate(ethernet_wait_task, "eth_wait", 4096, &tool, 5, nullptr);
     if (task_ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create Ethernet wait task");
     }
 }
 
-void play_startup_prompt_sound(m5_corep4_tool& tool, uint32_t delay_ms)
+void play_startup_prompt_sound(m5_corep4_tool &tool, uint32_t delay_ms)
 {
     if (!tool.get_startup_prompt_audio_enabled()) {
         ESP_LOGI(TAG, "Startup prompt sound disabled");
@@ -347,71 +328,66 @@ void play_startup_prompt_sound(m5_corep4_tool& tool, uint32_t delay_ms)
         return;
     }
 
-    auto* ctx = static_cast<StartupPromptSoundTaskContext*>(
-        std::malloc(sizeof(StartupPromptSoundTaskContext)));
+    auto *ctx = static_cast<StartupPromptSoundTaskContext *>(std::malloc(sizeof(StartupPromptSoundTaskContext)));
     if (!ctx) {
         ESP_LOGW(TAG, "Startup prompt sound skipped: no memory for delay task");
         return;
     }
 
-    ctx->tool = &tool;
+    ctx->tool     = &tool;
     ctx->delay_ms = delay_ms;
 
-    BaseType_t task_ret = xTaskCreate(startup_prompt_sound_task,
-                                      "startup_snd",
-                                      3072,
-                                      ctx,
-                                      5,
-                                      nullptr);
+    BaseType_t task_ret = xTaskCreate(startup_prompt_sound_task, "startup_snd", 3072, ctx, 5, nullptr);
     if (task_ret != pdPASS) {
         std::free(ctx);
         ESP_LOGW(TAG, "Startup prompt sound skipped: failed to create delay task");
     }
 }
 
-esp_err_t setup_context_bus_with_usb_serial_jtag(m5::py32bin::ContextBusAdapter& adapter) {
+esp_err_t setup_context_bus_with_usb_serial_jtag(m5::py32bin::ContextBusAdapter &adapter)
+{
     ESP_LOGI(TAG, "Setting up ContextBusAdapter with USB Serial JTAG (CDC)...");
-    
+
     // 初始化 USB Serial JTAG 驱动（增大缓冲区以容纳大固件）
     usb_serial_jtag_driver_config_t usb_serial_config = {
         .tx_buffer_size = 4096,   // 发送缓冲区 4KB
         .rx_buffer_size = 32768,  // 接收缓冲区 32KB（足够容纳 20KB 固件 + MD5）
     };
-    
+
     esp_err_t ret = usb_serial_jtag_driver_install(&usb_serial_config);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
         ESP_LOGE(TAG, "Failed to install USB Serial JTAG driver: %s", esp_err_to_name(ret));
         return ret;
     }
-    
+
     if (ret == ESP_ERR_INVALID_STATE) {
         ESP_LOGW(TAG, "USB Serial JTAG driver already installed");
     } else {
         ESP_LOGI(TAG, "USB Serial JTAG driver installed successfully");
     }
-    
+
     // 配置 ContextBusAdapter
     m5::py32bin::Py32ContextBusConfig bridge_config;
-    bridge_config.write_func = usb_serial_jtag_write_callback;
-    bridge_config.read_func = usb_serial_jtag_read_callback;
-    bridge_config.available_func = usb_serial_jtag_available_callback;
+    bridge_config.write_func         = usb_serial_jtag_write_callback;
+    bridge_config.read_func          = usb_serial_jtag_read_callback;
+    bridge_config.available_func     = usb_serial_jtag_available_callback;
     bridge_config.default_timeout_ms = 1000;
-    
+
     ret = adapter.configure(bridge_config);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to configure ContextBusAdapter: %s", esp_err_to_name(ret));
         return ret;
     }
-    
+
     ret = adapter.begin();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to begin ContextBusAdapter: %s", esp_err_to_name(ret));
         return ret;
     }
-    
+
     ESP_LOGI(TAG, "ContextBusAdapter with USB Serial JTAG setup completed successfully");
     ESP_LOGI(TAG, "Ready to communicate via USB CDC");
-    
+
     return ESP_OK;
 }
 
@@ -425,15 +401,13 @@ esp_err_t setup_context_bus_with_usb_serial_jtag(m5::py32bin::ContextBusAdapter&
 // ============================================================================
 
 // ---------- 辅助：带重试的draw_bitmap（等待上一次DMA传输完成） ----------
-static esp_err_t lcd_draw_bitmap_wait(esp_lcd_panel_handle_t panel,
-                                      int x0, int y0, int x1, int y1,
-                                      const void *data)
+static esp_err_t lcd_draw_bitmap_wait(esp_lcd_panel_handle_t panel, int x0, int y0, int x1, int y1, const void *data)
 {
     esp_err_t ret;
     for (int retry = 0; retry < 200; retry++) {
         ret = esp_lcd_panel_draw_bitmap(panel, x0, y0, x1, y1, data);
         if (ret == ESP_OK) return ESP_OK;
-        vTaskDelay(pdMS_TO_TICKS(1)); // 等待1ms后重试
+        vTaskDelay(pdMS_TO_TICKS(1));  // 等待1ms后重试
     }
     ESP_LOGE(TAG, "lcd_draw_bitmap_wait timeout at (%d,%d)-(%d,%d)", x0, y0, x1, y1);
     return ret;
@@ -444,9 +418,9 @@ static void fill_screen_rgb888(esp_lcd_panel_handle_t panel, uint8_t r, uint8_t 
 {
     const uint16_t H = 480, V = 480;
     // 逐行绘制以减少内存使用
-    const uint16_t ROWS = 20; // 每次20行
-    size_t buf_bytes = H * ROWS * 3;
-    uint8_t *buf = (uint8_t *)heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM);
+    const uint16_t ROWS = 20;  // 每次20行
+    size_t buf_bytes    = H * ROWS * 3;
+    uint8_t *buf        = (uint8_t *)heap_caps_malloc(buf_bytes, MALLOC_CAP_SPIRAM);
     if (!buf) return;
 
     for (int i = 0; i < (int)(H * ROWS); i++) {
@@ -466,15 +440,15 @@ static void fill_screen_rgb888(esp_lcd_panel_handle_t panel, uint8_t r, uint8_t 
 static void draw_white_border_black(esp_lcd_panel_handle_t panel)
 {
     const uint16_t H = 480, V = 480;
-    const uint16_t BORDER = 4; // 边框宽度
+    const uint16_t BORDER = 4;  // 边框宽度
     // 先填黑
     fill_screen_rgb888(panel, 0, 0, 0);
 
     // 上边框
     size_t row_bytes = H * 3;
-    uint8_t *row = (uint8_t *)heap_caps_malloc(row_bytes, MALLOC_CAP_SPIRAM);
+    uint8_t *row     = (uint8_t *)heap_caps_malloc(row_bytes, MALLOC_CAP_SPIRAM);
     if (!row) return;
-    memset(row, 0xFF, row_bytes); // 白色
+    memset(row, 0xFF, row_bytes);  // 白色
     for (uint16_t y = 0; y < BORDER; y++) {
         lcd_draw_bitmap_wait(panel, 0, y, H, y + 1, row);
     }
@@ -486,9 +460,9 @@ static void draw_white_border_black(esp_lcd_panel_handle_t panel)
 
     // 左右边框（逐列绘制，使用窄缓冲区）
     size_t col_bytes = V * 3;
-    uint8_t *col = (uint8_t *)heap_caps_malloc(col_bytes, MALLOC_CAP_SPIRAM);
+    uint8_t *col     = (uint8_t *)heap_caps_malloc(col_bytes, MALLOC_CAP_SPIRAM);
     if (!col) return;
-    memset(col, 0xFF, col_bytes); // 白色
+    memset(col, 0xFF, col_bytes);  // 白色
     // 左边框
     for (uint16_t x = 0; x < BORDER; x++) {
         lcd_draw_bitmap_wait(panel, x, 0, x + 1, V, col);
@@ -504,12 +478,12 @@ static void draw_white_border_black(esp_lcd_panel_handle_t panel)
 static void draw_touch_grid(esp_lcd_panel_handle_t panel)
 {
     const uint16_t H = 480, V = 480;
-    const uint16_t GRID = 6; // 6等份 = 5条线
+    const uint16_t GRID = 6;  // 6等份 = 5条线
 
     // 先清黑屏
     fill_screen_rgb888(panel, 0, 0, 0);
 
-    uint8_t line_r = 80, line_g = 80, line_b = 80; // 灰色网格线
+    uint8_t line_r = 80, line_g = 80, line_b = 80;  // 灰色网格线
 
     // 横线缓冲区（1行 x H像素）
     size_t row_bytes = H * 3;
@@ -548,15 +522,14 @@ static void draw_touch_grid(esp_lcd_panel_handle_t panel)
 static void touch_draw_loop(esp_lcd_panel_handle_t panel, esp_lcd_touch_handle_t tp)
 {
     ESP_LOGI(TAG, "Touch draw mode: touch to draw random color pixels.");
-    corep4.set_lcd_brightness(100); // 触摸测试始终最高亮度
+    corep4.set_lcd_brightness(100);  // 触摸测试始终最高亮度
 
     // 预定义鲜艳颜色(RGB888)
-    struct C3 { uint8_t r, g, b; };
-    const C3 palette[] = {
-        {255,0,0}, {0,255,0}, {0,0,255}, {255,255,0}, {255,0,255},
-        {0,255,255}, {255,128,0}, {255,255,255}, {128,255,0}, {0,128,255},
-        {255,0,128}, {128,0,255}
+    struct C3 {
+        uint8_t r, g, b;
     };
+    const C3 palette[] = {{255, 0, 0},   {0, 255, 0},     {0, 0, 255},   {255, 255, 0}, {255, 0, 255}, {0, 255, 255},
+                          {255, 128, 0}, {255, 255, 255}, {128, 255, 0}, {0, 128, 255}, {255, 0, 128}, {128, 0, 255}};
     const int palette_size = sizeof(palette) / sizeof(palette[0]);
 
     // 3x3像素缓冲区（更易看清轨迹）
@@ -593,8 +566,14 @@ static void touch_draw_loop(esp_lcd_panel_handle_t panel, esp_lcd_touch_handle_t
                 if (y0 < 0) y0 = 0;
                 int16_t x1 = x0 + DOT_SIZE;
                 int16_t y1 = y0 + DOT_SIZE;
-                if (x1 > 480) { x1 = 480; x0 = 480 - DOT_SIZE; }
-                if (y1 > 480) { y1 = 480; y0 = 480 - DOT_SIZE; }
+                if (x1 > 480) {
+                    x1 = 480;
+                    x0 = 480 - DOT_SIZE;
+                }
+                if (y1 > 480) {
+                    y1 = 480;
+                    y0 = 480 - DOT_SIZE;
+                }
 
                 lcd_draw_bitmap_wait(panel, x0, y0, x1, y1, dot_buf);
             }
@@ -608,7 +587,7 @@ static void touch_draw_loop(esp_lcd_panel_handle_t panel, esp_lcd_touch_handle_t
 void lcd_and_touch_test(void)
 {
     esp_lcd_panel_handle_t panel = corep4.get_lcd_panel_handle();
-    esp_lcd_touch_handle_t tp = corep4.get_touch_handle();
+    esp_lcd_touch_handle_t tp    = corep4.get_touch_handle();
     if (!panel || !tp) {
         ESP_LOGE(TAG, "LCD or Touch not initialized!");
         return;
@@ -625,15 +604,11 @@ void lcd_and_touch_test(void)
         const char *name;
     };
     const ColorPage pages[] = {
-        {0,   0,   0,   true,  "WhiteBorder+Black"},
-        {255, 0,   0,   false, "Red"},
-        {0,   255, 0,   false, "Green"},
-        {0,   0,   255, false, "Blue"},
-        {255, 255, 255, false, "White"},
-        {0,   0,   0,   false, "Black"},
+        {0, 0, 0, true, "WhiteBorder+Black"}, {255, 0, 0, false, "Red"},       {0, 255, 0, false, "Green"},
+        {0, 0, 255, false, "Blue"},           {255, 255, 255, false, "White"}, {0, 0, 0, false, "Black"},
     };
     const int num_pages = sizeof(pages) / sizeof(pages[0]);
-    int current_page = 0;
+    int current_page    = 0;
 
     // 亮度
     int brightness = 100;
@@ -650,21 +625,21 @@ void lcd_and_touch_test(void)
     draw_page();
 
     // 5次点击检测状态
-    int tap_count = 0;
-    int64_t tap_start_time = 0; // us
-    const int64_t TAP_WINDOW_US = 2000000; // 2秒
-    const int16_t CENTER = 240;
-    const int16_t HALF_SIDE = 120; // 240/2
+    int tap_count               = 0;
+    int64_t tap_start_time      = 0;        // us
+    const int64_t TAP_WINDOW_US = 2000000;  // 2秒
+    const int16_t CENTER        = 240;
+    const int16_t HALF_SIDE     = 120;  // 240/2
 
     // 滑动检测
-    int16_t swipe_start_x = -1;
-    int16_t swipe_start_y = -1;
-    bool swiping = false;
-    bool swipe_h_triggered = false; // 水平滑动已触发（切换页面）
-    bool swipe_v_triggered = false; // 垂直滑动已触发（亮度调节）
+    int16_t swipe_start_x  = -1;
+    int16_t swipe_start_y  = -1;
+    bool swiping           = false;
+    bool swipe_h_triggered = false;  // 水平滑动已触发（切换页面）
+    bool swipe_v_triggered = false;  // 垂直滑动已触发（亮度调节）
 
     // 点击检测：手指抬起才算一次tap
-    bool was_touching = false;
+    bool was_touching    = false;
     int16_t touch_down_x = -1;
     int16_t touch_down_y = -1;
 
@@ -683,11 +658,11 @@ void lcd_and_touch_test(void)
 
             if (!was_touching) {
                 // 手指刚按下
-                touch_down_x = x;
-                touch_down_y = y;
-                swipe_start_x = x;
-                swipe_start_y = y;
-                swiping = true;
+                touch_down_x      = x;
+                touch_down_y      = y;
+                swipe_start_x     = x;
+                swipe_start_y     = y;
+                swiping           = true;
                 swipe_h_triggered = false;
                 swipe_v_triggered = false;
             } else if (swiping) {
@@ -702,14 +677,14 @@ void lcd_and_touch_test(void)
                         if (brightness > 100) brightness = 100;
                         corep4.set_lcd_brightness((uint8_t)brightness);
                         ESP_LOGI(TAG, "Brightness UP: %d%%", brightness);
-                        swipe_start_y = y;
+                        swipe_start_y     = y;
                         swipe_v_triggered = true;
                     } else if (dy > 60) {
                         brightness -= 10;
                         if (brightness < 5) brightness = 5;
                         corep4.set_lcd_brightness((uint8_t)brightness);
                         ESP_LOGI(TAG, "Brightness DOWN: %d%%", brightness);
-                        swipe_start_y = y;
+                        swipe_start_y     = y;
                         swipe_v_triggered = true;
                     }
                 }
@@ -770,14 +745,14 @@ void lcd_and_touch_test(void)
                                 // 进入触摸测试界面
                                 draw_touch_grid(panel);
                                 touch_draw_loop(panel, tp);
-                                return; // touch_draw_loop是死循环，不会到这里
+                                return;  // touch_draw_loop是死循环，不会到这里
                             }
-                            tap_count = 0; // 超时重置
+                            tap_count = 0;  // 超时重置
                         }
 
                         // 检查超时
                         if ((now - tap_start_time) > TAP_WINDOW_US) {
-                            tap_count = 1; // 重新开始计数
+                            tap_count      = 1;  // 重新开始计数
                             tap_start_time = now;
                         }
                     } else {
@@ -787,7 +762,7 @@ void lcd_and_touch_test(void)
                 }
             }
             was_touching = false;
-            swiping = false;
+            swiping      = false;
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));

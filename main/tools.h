@@ -8,7 +8,7 @@
 
 /**
  * @brief 配置 ContextBusAdapter 使用 USB Serial JTAG (CDC)
- * 
+ *
  * @param adapter ContextBusAdapter 对象引用
  * @return esp_err_t ESP_OK 表示成功
  */
@@ -21,4 +21,4 @@ void start_ethernet_wait_task(m5_corep4_tool& tool);
 void play_startup_prompt_sound(m5_corep4_tool& tool, uint32_t delay_ms);
 void lcd_and_touch_test(void);
 
-#endif // __TOOLS_H__
+#endif  // __TOOLS_H__
