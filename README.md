@@ -1,5 +1,7 @@
 # M5CoreP4X UserDemo
 
+### SKU: C157
+
 M5CoreP4X UserDemo is the preinstalled ESP-IDF demonstration firmware for the M5Stack M5CoreP4X. It presents the complete device UI and demonstrates board-level capabilities including power control, display, touch, audio, RTC, IMU, microSD, Ethernet, ESP-Hosted Wi-Fi, USB Host, infrared, and Grove I2C.
 
 ## Hardware and Environment
