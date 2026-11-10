@@ -14,7 +14,7 @@ using namespace corep4_function_ui;
 constexpr const char* TAG = "UI_FUNC_I2C";
 constexpr uint8_t I2C_ADDR_MIN = 0x08;
 constexpr uint8_t I2C_ADDR_MAX = 0x77;
-constexpr int KNOWN_I2C_COUNT = 7;
+constexpr int KNOWN_I2C_COUNT = 8;
 constexpr int UNKNOWN_I2C_LINES = 3;
 constexpr int I2C_SCAN_BUS_COUNT = 2;
 constexpr int I2C_RESULT_BUBBLE_COUNT = KNOWN_I2C_COUNT + UNKNOWN_I2C_LINES;
@@ -34,7 +34,8 @@ constexpr KnownI2CDevice KNOWN_DEVICES[KNOWN_I2C_COUNT] = {
     {I2C_ADDR_ES8311, "ES8311"},
     {I2C_ADDR_ES7210, "ES7210"},
     {I2C_ADDR_CST3XX, "CST3XX"},
-    {I2C_ADDR_BMI270, "BMI270"},
+    {I2C_ADDR_LSM6DS3TRC, "LSM6DS3TR-C"},
+    {I2C_ADDR_LSM6DS3TRC_ALT, "LSM6DS3TR-C ALT"},
     {I2C_ADDR_RTC,    "RX8130"},
 };
 

@@ -1,4 +1,4 @@
-﻿# SPDX-FileCopyrightText: 2025 exia
+# SPDX-FileCopyrightText: 2025 exia
 # SPDX-License-Identifier: MIT
 
 # ============================================================================
@@ -20,7 +20,8 @@
 # 子组件开关（默认均为 OFF，确保拉取后只保留框架）
 # ============================================================================
 option(ENABLE_OTOOL_AUDIO      "Enable otool_audio subcomponent"      ON)
-option(ENABLE_OTOOL_BMI270     "Enable otool_bmi270 subcomponent"     ON)
+option(ENABLE_OTOOL_BMI270     "Enable otool_bmi270 subcomponent"     OFF)
+option(ENABLE_OTOOL_LSM6DS3TRC "Enable otool_lsm6ds3trc subcomponent" ON)
 option(ENABLE_OTOOL_IR         "Enable otool_ir subcomponent"         ON)
 option(ENABLE_OTOOL_POWER_IC   "Enable otool_power_ic subcomponent"   OFF)
 option(ENABLE_OTOOL_SD         "Enable otool_sd subcomponent"         ON)
@@ -67,6 +68,7 @@ set(EMBED_FILE_LIST)
 include(${CMAKE_CURRENT_LIST_DIR}/otool_i2c_bus/CMakeLists.txt)
 include(${CMAKE_CURRENT_LIST_DIR}/otool_audio/CMakeLists.txt)
 include(${CMAKE_CURRENT_LIST_DIR}/otool_bmi270/CMakeLists.txt)
+include(${CMAKE_CURRENT_LIST_DIR}/otool_lsm6ds3trc/CMakeLists.txt)
 include(${CMAKE_CURRENT_LIST_DIR}/otool_ir/CMakeLists.txt)
 include(${CMAKE_CURRENT_LIST_DIR}/otool_power_ic/CMakeLists.txt)
 include(${CMAKE_CURRENT_LIST_DIR}/otool_sd/CMakeLists.txt)

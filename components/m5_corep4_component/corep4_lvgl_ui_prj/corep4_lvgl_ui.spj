@@ -772,7 +772,7 @@
                   {
                     "nid": 1030,
                     "strtype": "LABEL/Text",
-                    "strval": "BMI270+BMM150",
+                    "strval": "LSM6DS3TR-C",
                     "InheritedType": 10
                   },
                   {

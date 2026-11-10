@@ -124,7 +124,7 @@ esp_err_t m5_corep4_tool::init_device_status(void)
     device_status.audio.is_playing = false;
 
     // 初始化IMU状态
-    device_status.imu.bmi270_initialized = false;
+    device_status.imu.lsm6ds3trc_initialized = false;
     device_status.imu.acc_enabled = false;
     device_status.imu.gyr_enabled = false;
     device_status.imu.mag_enabled = false;
@@ -269,8 +269,8 @@ void m5_corep4_tool::print_device_status(esp_log_level_t level)
                   device_status.audio.is_playing);
 
     ESP_LOG_LEVEL(level, TAG, "[IMU]");
-    ESP_LOG_LEVEL(level, TAG, "  BMI270=%d ACC=%d GYR=%d MAG=%d",
-                  device_status.imu.bmi270_initialized,
+    ESP_LOG_LEVEL(level, TAG, "  LSM6DS3TR-C=%d ACC=%d GYR=%d MAG=%d",
+                  device_status.imu.lsm6ds3trc_initialized,
                   device_status.imu.acc_enabled,
                   device_status.imu.gyr_enabled,
                   device_status.imu.mag_enabled);
@@ -714,13 +714,13 @@ esp_err_t m5_corep4_tool::set_status(StatusParam param, const StatusValue& value
         }
 
         // ========== IMU related parameters ==========
-        case StatusParam::IMU_BMI270_INITIALIZED: {
+        case StatusParam::IMU_LSM6DS3TRC_INITIALIZED: {
             bool initialized;
             if (!get_status_value(value, initialized)) {
                 return ESP_ERR_INVALID_ARG;
             }
             if (flags & StatusConfigFlag::UPDATE_STATUS) {
-                device_status.imu.bmi270_initialized = initialized;
+                device_status.imu.lsm6ds3trc_initialized = initialized;
             }
             break;
         }
@@ -947,8 +947,8 @@ esp_err_t m5_corep4_tool::get_status(StatusParam param, StatusValue& value)
             break;
 
         // ========== IMU related parameters ==========
-        case StatusParam::IMU_BMI270_INITIALIZED:
-            value = device_status.imu.bmi270_initialized;
+        case StatusParam::IMU_LSM6DS3TRC_INITIALIZED:
+            value = device_status.imu.lsm6ds3trc_initialized;
             break;
         case StatusParam::IMU_ACC_ENABLED:
             value = device_status.imu.acc_enabled;

@@ -9,7 +9,8 @@
 #define I2C_ADDR_RTC        0x32    // RX8130CE 实时时钟芯片
 #define I2C_ADDR_ES7210     0x40    // ES7210 音频编解码器
 #define I2C_ADDR_CST3XX     0x58    // CST3XX 触摸 默认地址
-#define I2C_ADDR_BMI270     0x68    // BMI270 IMU 默认地址
+#define I2C_ADDR_LSM6DS3TRC     0x6A    // LSM6DS3TR-C SA0=0 默认地址
+#define I2C_ADDR_LSM6DS3TRC_ALT 0x6B    // LSM6DS3TR-C SA0=1 可选地址
 #define I2C_ADDR_PM1        0x6E    // PM1 默认地址
 #define I2C_ADDR_PYB        0xFF    // PY32 IO Expander 默认地址
 

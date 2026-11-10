@@ -362,7 +362,7 @@ void imu_fusion_task(void *parameter) {
   while (tool && s_imu_page.page_alive &&
          generation == s_imu_page.generation &&
          !s_imu_page.fusion_stop_requested) {
-    bmi270_tools::sensor_data_t data = {};
+    lsm6ds3trc_tools::sensor_data_t data = {};
     const esp_err_t result = tool->imu_read_sensor_data(data, false);
     if (result == ESP_OK && (data.acc_valid || data.gyr_valid) &&
         (!last_sensor_time_valid || data.sensor_time != last_sensor_time)) {
@@ -389,17 +389,23 @@ void imu_fusion_task(void *parameter) {
         gyr_valid = true;
       }
 
-      // The BMI270 screen Y axis points down, while the model Y axis points up.
-      // Angular velocity is a pseudovector, so X and Z also change sign.
-      if (attitude.update(acc_x, -acc_y, acc_z, data.acc_valid && acc_valid,
-                          -gyr_x, gyr_y, -gyr_z,
+      // CoreP4X uses the BMI270 board convention. The LSM6DS3TR-C package is
+      // rotated 90 degrees in-plane: board = (raw_y, -raw_x, raw_z).
+      // The display model additionally uses +Y up, so vector inputs become
+      // (raw_y, raw_x, raw_z). Angular velocity is a pseudovector under the
+      // same rotation, hence (-raw_gy, -raw_gx, -raw_gz).
+      if (attitude.update(acc_y, acc_x, acc_z, data.acc_valid && acc_valid,
+                          -gyr_y, -gyr_x, -gyr_z,
                           data.gyr_valid && gyr_valid, delta_seconds)) {
         if (take_recenter_request() && acc_valid &&
-            attitude.recenter_from_acceleration(acc_x, -acc_y, acc_z)) {
+            attitude.recenter_from_acceleration(acc_y, acc_x, acc_z)) {
           reference = attitude.orientation();
           reference_valid = true;
           publish_pose({});
-        } else if (!reference_valid && attitude.calibrated()) {
+        } else if (!reference_valid && attitude.ready()) {
+          // Show the model after the first valid ACC frame. Gyro bias
+          // calibration keeps converging in the background and must not gate
+          // the whole screen indefinitely.
           attitude.clear_correction();
           reference = attitude.orientation();
           reference_valid = true;
@@ -512,7 +518,7 @@ void imu_init_task(void *parameter) {
   delete context;
 
   auto *tool = corep4_ui_sync_get_tool();
-  const esp_err_t result = tool ? tool->imu_init(false, bmi270_tools::MODE_BASE)
+  const esp_err_t result = tool ? tool->imu_init(false)
                                 : ESP_ERR_INVALID_STATE;
   esp_err_t start_result = result;
   if (result == ESP_OK && tool &&

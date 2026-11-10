@@ -23,7 +23,7 @@
 #include "m5_corep4_pinmap.h"
 
 #include "otool_toolbox.h"
-#include "bmi270_tools.h"
+#include "lsm6ds3trc_tools.h"
 #include "M5PM1.h"
 #include "M5IOE1.h"
 
@@ -246,7 +246,7 @@ typedef struct {
  * @brief IMU状态结构
  */
 typedef struct {
-    bool bmi270_initialized;    ///< BMI270初始化状态
+    bool lsm6ds3trc_initialized;    ///< LSM6DS3TR-C初始化状态
     bool acc_enabled;           ///< 加速度计启用状态
     bool gyr_enabled;           ///< 陀螺仪启用状态
     bool mag_enabled;           ///< 磁力计启用状态
@@ -344,7 +344,7 @@ class m5_corep4_tool
 public:
     otool_toolbox otool_tools;      ///< 工具箱子模块
     M5IOE1 pyb;       ///< PY32 IO Expander 对象 (M5IOE1)
-    bmi270_tools bmi270;            ///< BMI270 6轴传感器对象
+    lsm6ds3trc_tools lsm6ds3trc;            ///< LSM6DS3TR-C 6轴传感器对象
     rx8130_tools rtc;            ///< RX8130 RTC对象
     M5PM1 pm1;                      ///< PM1 电源管理对象
     
@@ -370,16 +370,16 @@ public:
     // ==================== IMU shared service ====================
 
     /**
-     * @brief Initialize BMI270, optional BMM150, and shared data service.
-     * @param configure_motion_interrupt 是否配置 any-motion 中断（含 500ms 稳定延迟）。
-     *        仅睡眠唤醒场景需要；常规界面（如 IMU 指南针）传 false 以避免无用开销。
+     * @brief Initialize LSM6DS3TR-C and the shared data service.
+     * @param configure_motion_interrupt Configure wake-up (any-motion) on INT1.
      */
-    esp_err_t imu_init(bool enable_magnetometer = true,
-                       bmi270_tools::bmi270_mode_t mode = bmi270_tools::MODE_BASE,
-                       bool configure_motion_interrupt = false);
+    esp_err_t imu_init(bool configure_motion_interrupt = false);
+
+    /** @brief Read the latched wake-up event until the next motion. */
+    bool imu_check_interrupt_status(void);
 
     /**
-     * @brief Configure BMI270 any-motion detection and INT1 mapping.
+     * @brief Configure LSM6DS3TR-C any-motion detection and INT1 mapping.
      */
     esp_err_t imu_configure_motion_interrupt(void);
 
@@ -394,22 +394,22 @@ public:
     esp_err_t imu_stop_service(void);
 
     /**
-     * @brief 睡前停止IMU任务，并收敛BMI270/BMM150与PM1 GPIO0状态。
+     * @brief Stop the IMU task and converge LSM6DS3TR-C and PM1 GPIO0 for sleep.
      */
     esp_err_t imu_prepare_for_sleep(bool keep_motion_wake = false);
 
     /**
      * @brief Read the sensor directly and refresh the shared cache/status.
      */
-    esp_err_t imu_read_sensor_data(bmi270_tools::sensor_data_t& data, bool update_status = true);
+    esp_err_t imu_read_sensor_data(lsm6ds3trc_tools::sensor_data_t& data, bool update_status = true);
 
     /**
      * @brief Get the latest cached IMU sample without touching I2C.
      */
-    esp_err_t imu_get_latest_sensor_data(bmi270_tools::sensor_data_t& data);
+    esp_err_t imu_get_latest_sensor_data(lsm6ds3trc_tools::sensor_data_t& data);
 
     /**
-     * @brief Clear BMI270 interrupt status.
+     * @brief Clear LSM6DS3TR-C interrupt status.
      */
     esp_err_t imu_clear_interrupt(void);
 
@@ -518,7 +518,7 @@ public:
      * 在进入深度休眠之前执行必要的准备工作，包括：
      * - 关闭屏幕背光
      * - 关闭触摸屏（进入休眠模式）
-    * - 按唤醒配置收敛BMI270/BMM150：需要BMI唤醒时保留ACC+INT1，不需要时完全关闭
+    * - 按唤醒配置收敛LSM6DS3TR-C：需要运动唤醒时保留 ACC+INT1，不需要时完全关闭
      * - 禁用RTC中断输出
      * - 配置PM1和PYB I2C休眠参数
      * 
@@ -555,11 +555,11 @@ public:
     /**
      * @brief 低功耗测试函数
      * 
-        * 关闭SD卡、BMI270、RTC中断、触摸屏等外设，配置PM1和PYB I2C休眠参数后进入ESP32深度休眠
+        * 关闭SD卡、LSM6DS3TR-C、RTC中断、触摸屏等外设，配置PM1和PYB I2C休眠参数后进入ESP32深度休眠
      * 
      * 执行步骤:
         * 1. 卸载SD卡并释放SD GPIO/SD_DECT
-        * 2. 关闭BMI270传感器（写PWR_CTRL寄存器进入休眠）
+        * 2. 关闭LSM6DS3TR-C传感器（写 CTRL1_XL/CTRL2_G 进入掉电）
         * 3. 禁用RTC中断输出并清除中断标志
         * 4. 初始化触摸屏后发送CST3XX深度休眠命令
         * 5. 配置PM1 I2C休眠时间和PYB I2C配置
@@ -1303,10 +1303,10 @@ private:
     uint64_t boot_timestamp_ms;              ///< 启动时间戳(毫秒)，用于计算运行时间
     std::vector<StatusUISyncCallback> ui_sync_callbacks;   ///< UI同步回调函数列表
 
-    SemaphoreHandle_t imu_data_mutex;        ///< Protects BMI270 access and latest IMU cache
+    SemaphoreHandle_t imu_data_mutex;        ///< Protects LSM6DS3TR-C access and latest IMU cache
     TaskHandle_t imu_service_task_handle;    ///< Shared IMU sampling task
     volatile bool imu_service_stop_requested; ///< Requests the IMU sampling task to exit
-    bmi270_tools::sensor_data_t latest_imu_data; ///< Latest shared IMU sample
+    lsm6ds3trc_tools::sensor_data_t latest_imu_data; ///< Latest shared IMU sample
     bool imu_data_valid;                     ///< Whether latest_imu_data contains a valid sample
     uint32_t imu_service_period_ms;          ///< IMU sampling period
 
@@ -1322,7 +1322,7 @@ private:
     static void imu_service_task(void *pvParameters);
     bool lvgl_ui_ready() const;
     bool try_lock_lvgl_ui(uint32_t timeout_ms) const;
-    void imu_update_status_from_data(const bmi270_tools::sensor_data_t& data,
+    void imu_update_status_from_data(const lsm6ds3trc_tools::sensor_data_t& data,
                                      StatusConfigFlag flags = StatusConfigFlag::UPDATE_STATUS);
     esp_err_t load_system_preferences_from_nvs();
     esp_err_t save_system_preference_bool(const char* key, bool enabled);

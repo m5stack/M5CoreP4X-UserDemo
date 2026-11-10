@@ -83,7 +83,7 @@ enum class StatusParam : uint16_t {
     AUDIO_IS_PLAYING,                ///< 正在播放状态 (bool)
 
     // ========== IMU相关 (0x0800 - 0x08FF) ==========
-    IMU_BMI270_INITIALIZED = 0x0800, ///< BMI270初始化状态 (bool)
+    IMU_LSM6DS3TRC_INITIALIZED = 0x0800, ///< LSM6DS3TR-C初始化状态 (bool)
     IMU_ACC_ENABLED,                 ///< 加速度计启用状态 (bool)
     IMU_GYR_ENABLED,                 ///< 陀螺仪启用状态 (bool)
     IMU_MAG_ENABLED,                 ///< 磁力计启用状态 (bool)

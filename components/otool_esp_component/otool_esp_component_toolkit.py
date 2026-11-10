@@ -102,6 +102,7 @@ class C:
 SUBCOMPONENT_OPTIONS: List[str] = [
     "ENABLE_OTOOL_AUDIO",
     "ENABLE_OTOOL_BMI270",
+    "ENABLE_OTOOL_LSM6DS3TRC",
     "ENABLE_OTOOL_IR",
     "ENABLE_OTOOL_POWER_IC",
     "ENABLE_OTOOL_SD",
@@ -111,7 +112,8 @@ SUBCOMPONENT_OPTIONS: List[str] = [
 # 子组件中文描述
 SUBCOMPONENT_LABELS: Dict[str, str] = {
     "ENABLE_OTOOL_AUDIO":      "音频 (ES8311/ES7210/SR/DSP)",
-    "ENABLE_OTOOL_BMI270":     "IMU (BMI270 + BMM150)",
+    "ENABLE_OTOOL_BMI270":     "IMU (BMI270 + BMM150, legacy)",
+    "ENABLE_OTOOL_LSM6DS3TRC": "IMU (LSM6DS3TR-C)",
     "ENABLE_OTOOL_IR":         "红外 (NEC/RC5 编解码)",
     "ENABLE_OTOOL_POWER_IC":   "电源IC (IP2315)",
     "ENABLE_OTOOL_SD":         "SD卡 (MMC/SPI)",
@@ -121,7 +123,8 @@ SUBCOMPONENT_LABELS: Dict[str, str] = {
 # 子组件短标签（用于状态行紧凑显示）
 SUBCOMPONENT_SHORT: Dict[str, str] = {
     "ENABLE_OTOOL_AUDIO":      "AUDIO",
-    "ENABLE_OTOOL_BMI270":     "IMU",
+    "ENABLE_OTOOL_BMI270":     "BMI",
+    "ENABLE_OTOOL_LSM6DS3TRC": "LSM6",
     "ENABLE_OTOOL_IR":         "IR",
     "ENABLE_OTOOL_POWER_IC":   "PWR",
     "ENABLE_OTOOL_SD":         "SD",

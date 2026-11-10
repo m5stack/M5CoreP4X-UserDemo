@@ -188,7 +188,7 @@ void ui_mian_screen_init(void)
     lv_obj_set_x(ui_bmititle, -180);
     lv_obj_set_y(ui_bmititle, -50);
     lv_obj_set_align(ui_bmititle, LV_ALIGN_CENTER);
-    lv_label_set_text(ui_bmititle, "BMI270+BMM150");
+    lv_label_set_text(ui_bmititle, "LSM6DS3TR-C");
 
     ui_bmichart = lv_chart_create(ui_bmicon);
     lv_obj_set_width(ui_bmichart, 480);

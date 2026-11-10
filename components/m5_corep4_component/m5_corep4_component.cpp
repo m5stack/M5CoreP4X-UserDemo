@@ -535,7 +535,7 @@ m5_corep4_tool::m5_corep4_tool()
     imu_data_mutex = nullptr;
     imu_service_task_handle = nullptr;
     imu_service_stop_requested = false;
-    memset(&latest_imu_data, 0, sizeof(latest_imu_data));
+    latest_imu_data = {};
     imu_data_valid = false;
     imu_service_period_ms = 50;
 }
@@ -1165,7 +1165,7 @@ esp_err_t m5_corep4_tool::enter_deep_sleep()
     }
     if (wake_bmi &&
         check_pm1_irq_op(pm1.irqSetGpioMask(M5PM1_IRQ_GPIO0, M5PM1_IRQ_MASK_DISABLE),
-                         "Unmask PM1 GPIO0 IRQ for BMI wake") != ESP_OK) {
+                         "Unmask PM1 GPIO0 IRQ for IMU motion wake") != ESP_OK) {
         return ESP_FAIL;
     }
     if (wake_rtc &&
@@ -1426,7 +1426,7 @@ esp_err_t m5_corep4_tool::sleep_before_work()
     ESP_LOGI(TAG, "Power: PYB USBA -> OFF");
     set_status(StatusParam::POWER_PYB_USBA, false, StatusConfigFlag::UPDATE_STATUS | StatusConfigFlag::APPLY_HARDWARE);
 
-    // 3. BMI270/BMM150已在sleep_before_work开头完成任务停止、中断输出、AUX上拉和PWR_CTRL收敛。
+    // 3. LSM6DS3TR-C 已在 sleep_before_work 开头完成任务停止、中断输出和掉电收敛。
     ESP_LOGI(TAG, "IMU sleep state prepared (motion_wake=%s)", wake_bmi ? "on" : "off");
 
     // 4. 配置/关闭RX8130定时器中断（RTC唤醒走RX8130，不走PM1定时器）
@@ -3438,9 +3438,9 @@ void m5_corep4_tool::p4_pm1_irq_task(void *pvParameters)
             if (gpio_ret == M5PM1_OK && gpio_irq_status != 0) {
                 ESP_LOGI(task_tag, "PM1 GPIO IRQ: 0x%02X", gpio_irq_status);
                 
-                // 检查GPIO0中断（BMI270传感器中断）
+                // 检查 GPIO0 中断（LSM6DS3TR-C 传感器中断）
                 if (gpio_irq_status & (1 << M5PM1_GPIO_NUM_0)) {
-                    ESP_LOGI(task_tag, "BMI270 sensor interrupt detected on PM1 GPIO0");
+                    ESP_LOGI(task_tag, "LSM6DS3TR-C sensor interrupt detected on PM1 GPIO0");
                     // lvgl ui_irqcon 背景 配置为红色
                     // 在LVGL线程安全地设置指示器为红色并短暂高亮，随后恢复原样
                     if (self->try_lock_lvgl_ui(100)) {
@@ -3451,7 +3451,7 @@ void m5_corep4_tool::p4_pm1_irq_task(void *pvParameters)
                         lvgl_port_unlock();
                     }
 
-                    // 清除BMI270中断
+                    // 清除 LSM6DS3TR-C 中断
                     self->imu_clear_interrupt();
 
                     // 创建一个一次性任务，在短延迟后恢复指示器颜色与文字
@@ -4306,10 +4306,9 @@ esp_err_t m5_corep4_tool::get_ethernet_ip_info(esp_netif_ip_info_t* ip_info)
 
 // ==================== IMU shared service ====================
 
-esp_err_t m5_corep4_tool::imu_init(bool enable_magnetometer, bmi270_tools::bmi270_mode_t mode,
-                                   bool configure_motion_interrupt)
+esp_err_t m5_corep4_tool::imu_init(bool configure_motion_interrupt)
 {
-    const char *task_tag = "IMU_SERVICE";
+    const char* task_tag = "IMU_SERVICE";
 
     if (imu_data_mutex == nullptr) {
         imu_data_mutex = xSemaphoreCreateMutex();
@@ -4319,144 +4318,113 @@ esp_err_t m5_corep4_tool::imu_init(bool enable_magnetometer, bmi270_tools::bmi27
         }
     }
 
-    const bool bmi270_was_initialized = bmi270.is_initialized();
-    if (enable_magnetometer && bmi270_was_initialized) {
-        if (imu_service_task_handle != nullptr) {
-            ESP_LOGI(task_tag, "Stopping IMU service before BMM150 reconfiguration");
-            imu_stop_service();
-        }
-        esp_err_t power_ret = set_status(StatusParam::POWER_PYB_L3B, true);
+    if (!lsm6ds3trc.is_initialized()) {
+        ESP_LOGI(task_tag, "Initializing LSM6DS3TR-C shared service...");
+        const esp_err_t power_ret = set_status(StatusParam::POWER_PYB_L3B, true);
         if (power_ret != ESP_OK) {
-            ESP_LOGW(task_tag, "Failed to enable PYB L3B before BMM150 reconfiguration: %s",
+            ESP_LOGW(task_tag, "Failed to enable PYB L3B before LSM6DS3TR-C init: %s",
                      esp_err_to_name(power_ret));
         }
         vTaskDelay(pdMS_TO_TICKS(50));
-    }
 
-    if (!bmi270.is_initialized()) {
-        ESP_LOGI(task_tag, "Initializing BMI270/BMM150 shared service...");
-        esp_err_t power_ret = set_status(StatusParam::POWER_PYB_L3B, true);
-        if (power_ret != ESP_OK) {
-            ESP_LOGW(task_tag, "Failed to enable PYB L3B before BMI270 init: %s", esp_err_to_name(power_ret));
+        // Reuse a scanned handle when available; otherwise the driver probes
+        // and validates WHO_AM_I at both 0x6A and 0x6B.
+        i2c_bus_device_handle_t lsm_handle = nullptr;
+        uint8_t lsm_address = 0;
+        const uint8_t imu_addresses[] = {I2C_ADDR_LSM6DS3TRC,
+                                         I2C_ADDR_LSM6DS3TRC_ALT};
+        for (const uint8_t candidate : imu_addresses) {
+            lsm_handle = otool_tools.i2c_tools.get_i2c_device_handle(candidate);
+            if (lsm_handle != nullptr) {
+                lsm_address = candidate;
+                break;
+            }
         }
-        vTaskDelay(pdMS_TO_TICKS(50));
-
-        auto bmi270_device_handle = otool_tools.i2c_tools.get_i2c_device_handle(I2C_BMI270_ADDR);
-        esp_err_t init_ret = bmi270.init(otool_tools.i2c_tools.get_i2c_bus_handle(),
-                                         &bmi270_device_handle,
-                                         enable_magnetometer,
-                                         mode);
+        const esp_err_t init_ret = lsm6ds3trc.init(
+            otool_tools.i2c_tools.get_i2c_bus_handle(),
+            lsm_handle ? &lsm_handle : nullptr,
+            lsm_address);
         if (init_ret != ESP_OK) {
-            set_status(StatusParam::IMU_BMI270_INITIALIZED, false,
+            set_status(StatusParam::IMU_LSM6DS3TRC_INITIALIZED, false,
                        StatusConfigFlag::UPDATE_STATUS | StatusConfigFlag::SYNC_UI);
-            ESP_LOGE(task_tag, "BMI270 initialization failed: %s", esp_err_to_name(init_ret));
+            ESP_LOGE(task_tag, "LSM6DS3TR-C initialization failed: %s",
+                     esp_err_to_name(init_ret));
             return init_ret;
         }
     } else {
-        ESP_LOGI(task_tag, "BMI270 already initialized, reusing shared service");
+        ESP_LOGI(task_tag, "LSM6DS3TR-C already initialized, reusing shared service");
     }
 
-    set_status(StatusParam::IMU_BMI270_INITIALIZED, true,
+    set_status(StatusParam::IMU_LSM6DS3TRC_INITIALIZED, true,
                StatusConfigFlag::UPDATE_STATUS | StatusConfigFlag::SYNC_UI);
 
-    bmi270_tools::sensor_type_t base_sensors[] = {
-        bmi270_tools::SENSOR_ACCEL,
-        bmi270_tools::SENSOR_GYRO,
+    lsm6ds3trc_tools::sensor_type_t base_sensors[] = {
+        lsm6ds3trc_tools::SENSOR_ACCEL,
+        lsm6ds3trc_tools::SENSOR_GYRO,
     };
-    esp_err_t enable_ret = bmi270.enable_sensors(base_sensors, 2);
-    if (enable_ret == ESP_OK) {
-        set_status(StatusParam::IMU_ACC_ENABLED, true,
-                   StatusConfigFlag::UPDATE_STATUS | StatusConfigFlag::SYNC_UI);
-        set_status(StatusParam::IMU_GYR_ENABLED, true,
-                   StatusConfigFlag::UPDATE_STATUS | StatusConfigFlag::SYNC_UI);
-    } else {
-        ESP_LOGW(task_tag, "Failed to enable ACC/GYR sensors: %s", esp_err_to_name(enable_ret));
+    const esp_err_t enable_ret = lsm6ds3trc.enable_sensors(base_sensors, 2);
+    if (enable_ret != ESP_OK) {
+        ESP_LOGE(task_tag, "Failed to enable ACC/GYR: %s", esp_err_to_name(enable_ret));
+        return enable_ret;
     }
-    if (enable_magnetometer && bmi270_was_initialized) {
-        ESP_LOGI(task_tag, "Reconfiguring BMM150 magnetometer for reused BMI270");
-        int mag_ret = bmi270.configure_magnetometer();
-        if (mag_ret == 0) {
-            ESP_LOGI(task_tag, "BMM150 magnetometer reconfigured successfully");
-        } else {
-            ESP_LOGW(task_tag, "BMM150 magnetometer reconfiguration failed: %d", mag_ret);
-            set_status(StatusParam::IMU_MAG_ENABLED, false,
-                       StatusConfigFlag::UPDATE_STATUS | StatusConfigFlag::SYNC_UI);
-        }
-    } else if (!enable_magnetometer) {
-        set_status(StatusParam::IMU_MAG_ENABLED, false,
-                   StatusConfigFlag::UPDATE_STATUS | StatusConfigFlag::SYNC_UI);
-    }
+    set_status(StatusParam::IMU_ACC_ENABLED, true,
+               StatusConfigFlag::UPDATE_STATUS | StatusConfigFlag::SYNC_UI);
+    set_status(StatusParam::IMU_GYR_ENABLED, true,
+               StatusConfigFlag::UPDATE_STATUS | StatusConfigFlag::SYNC_UI);
+    set_status(StatusParam::IMU_MAG_ENABLED, false,
+               StatusConfigFlag::UPDATE_STATUS | StatusConfigFlag::SYNC_UI);
 
-    // any-motion 中断仅睡眠唤醒场景需要，并附带 500ms 稳定延迟。
-    // 常规界面（IMU 指南针等）传 configure_motion_interrupt=false，跳过以加快进入、降低开销。
-    if (configure_motion_interrupt) {
-        esp_err_t motion_ret = imu_configure_motion_interrupt();
-        if (motion_ret != ESP_OK) {
-            ESP_LOGW(task_tag, "BMI270 motion interrupt setup failed: %s", esp_err_to_name(motion_ret));
-        }
-    }
-
-    bmi270_tools::sensor_data_t first_sample{};
-    esp_err_t read_ret = imu_read_sensor_data(first_sample, true);
+    vTaskDelay(pdMS_TO_TICKS(20));
+    lsm6ds3trc_tools::sensor_data_t first_sample{};
+    const esp_err_t read_ret = imu_read_sensor_data(first_sample, true);
     if (read_ret != ESP_OK) {
         ESP_LOGW(task_tag, "Initial IMU sample failed: %s", esp_err_to_name(read_ret));
+    }
+
+    if (configure_motion_interrupt) {
+        const esp_err_t motion_ret = imu_configure_motion_interrupt();
+        if (motion_ret != ESP_OK) {
+            ESP_LOGE(task_tag, "LSM6DS3TR-C motion interrupt setup failed: %s",
+                     esp_err_to_name(motion_ret));
+            return motion_ret;
+        }
     }
 
     return imu_start_service(50);
 }
 
+bool m5_corep4_tool::imu_check_interrupt_status(void)
+{
+    return lsm6ds3trc.check_interrupt_status();
+}
+
 esp_err_t m5_corep4_tool::imu_configure_motion_interrupt(void)
 {
-    const char *task_tag = "IMU_SERVICE";
+    const char* task_tag = "IMU_SERVICE";
+    if (!lsm6ds3trc.is_initialized()) return ESP_ERR_INVALID_STATE;
 
-    if (!bmi270.is_initialized()) {
-        return ESP_ERR_INVALID_STATE;
+    lsm6ds3trc_tools::sensor_type_t accel = lsm6ds3trc_tools::SENSOR_ACCEL;
+    esp_err_t ret = lsm6ds3trc.enable_sensors(&accel, 1);
+    if (ret != ESP_OK) return ret;
+
+    lsm6ds3trc_tools::motion_config_t config = {};
+    config.threshold = 0x04; // About 125 mg at +/-2 g.
+    config.duration = 0x01;  // WAKE_UP_DUR wake-up duration.
+    ret = lsm6ds3trc.configure_motion_interrupt(
+        config, lsm6ds3trc_tools::INT_PIN_1, true, true, true);
+    if (ret != ESP_OK) {
+        ESP_LOGE(task_tag, "Failed to configure wake-up interrupt: %s",
+                 esp_err_to_name(ret));
+        return ret;
     }
 
-    ESP_LOGI(task_tag, "Enabling BMI2_ACCEL and BMI2_ANY_MOTION features...");
-    bmi270_tools::sensor_type_t motion_sensors[] = {
-        bmi270_tools::SENSOR_ACCEL,
-        static_cast<bmi270_tools::sensor_type_t>(BMI2_ANY_MOTION)
-    };
-    esp_err_t enable_ret = bmi270.enable_sensors(motion_sensors, 2);
-    if (enable_ret != ESP_OK) {
-        ESP_LOGE(task_tag, "Failed to enable BMI2_ANY_MOTION feature: %s", esp_err_to_name(enable_ret));
-        return enable_ret;
-    }
-
-    bmi270_tools::motion_config_t motion_config;
-    motion_config.duration = 0x0A;
-    motion_config.threshold = 0x60;
-    ESP_LOGI(task_tag, "Configuring any-motion with duration=%u (%.1fms), threshold=%u (%.1fmg)",
-             motion_config.duration, motion_config.duration * 20.0f,
-             motion_config.threshold, motion_config.threshold * 0.48f);
-    esp_err_t motion_ret = bmi270.configure_any_motion(motion_config);
-    if (motion_ret != ESP_OK) {
-        ESP_LOGW(task_tag, "Failed to configure any-motion detection: %s", esp_err_to_name(motion_ret));
-        return motion_ret;
-    }
-
-    ESP_LOGI(task_tag, "Configuring BMI270 interrupt...");
-    esp_err_t int_enable_ret = bmi270.enable_interrupt(bmi270_tools::INT_PIN_1, false, true, false);
-    if (int_enable_ret != ESP_OK) {
-        ESP_LOGE(task_tag, "Failed to enable interrupt: %s", esp_err_to_name(int_enable_ret));
-        return int_enable_ret;
-    }
-
-    esp_err_t int_map_ret = bmi270.map_interrupt_to_pin(BMI2_ANY_MOTION, bmi270_tools::INT_PIN_1);
-    if (int_map_ret != ESP_OK) {
-        ESP_LOGE(task_tag, "Failed to map interrupt: %s", esp_err_to_name(int_map_ret));
-        return int_map_ret;
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(500));
-    ESP_LOGI(task_tag, "BMI270 motion interrupt configured");
+    ESP_LOGI(task_tag, "LSM6DS3TR-C wake-up interrupt configured on INT1");
     return ESP_OK;
 }
 
 esp_err_t m5_corep4_tool::imu_start_service(uint32_t period_ms)
 {
-    if (!bmi270.is_initialized()) {
+    if (!lsm6ds3trc.is_initialized()) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -4543,17 +4511,17 @@ esp_err_t m5_corep4_tool::imu_prepare_for_sleep(bool keep_motion_wake)
         }
     };
 
-    if (keep_motion_wake && !bmi270.is_initialized()) {
-        ESP_LOGI(task_tag, "BMI wake requested, initializing minimal IMU path");
+    if (keep_motion_wake && !lsm6ds3trc.is_initialized()) {
+        ESP_LOGI(task_tag, "Motion wake requested, initializing minimal IMU path");
         set_status(StatusParam::POWER_PYB_L3B, true);
         vTaskDelay(pdMS_TO_TICKS(20));
         // 睡眠唤醒需要 any-motion 中断，懒初始化路径必须显式配置中断。
-        keep_first_error(imu_init(false, bmi270_tools::MODE_BASE, true));
-    } else if (keep_motion_wake && bmi270.is_initialized()) {
+        keep_first_error(imu_init(true));
+    } else if (keep_motion_wake && lsm6ds3trc.is_initialized()) {
         // IMU 已被界面初始化（不带中断，imu_init configure_motion_interrupt=false）。
-        // 此时 bmi270.prepare_for_sleep(true) 只会 enable/map INT1，并不会使能 ANY_MOTION
-        // 特征或写阈值，需在此显式补配，否则从 IMU 界面直接睡眠时运动唤醒会失效。
-        ESP_LOGI(task_tag, "BMI wake requested, (re)configuring any-motion interrupt on initialized IMU");
+        // 从 IMU 界面进入睡眠时先显式重配 WAKE_UP + INT1，
+        // 再执行 prepare_for_sleep(true) 收敛采样与中断配置。
+        ESP_LOGI(task_tag, "Motion wake requested, configuring wake-up interrupt on initialized IMU");
         keep_first_error(imu_configure_motion_interrupt());
     }
 
@@ -4562,10 +4530,10 @@ esp_err_t m5_corep4_tool::imu_prepare_for_sleep(bool keep_motion_wake)
     if (imu_data_mutex != nullptr) {
         xSemaphoreTake(imu_data_mutex, portMAX_DELAY);
     }
-    if (bmi270.is_initialized()) {
-        keep_first_error(bmi270.prepare_for_sleep(keep_motion_wake));
+    if (lsm6ds3trc.is_initialized()) {
+        keep_first_error(lsm6ds3trc.prepare_for_sleep(keep_motion_wake));
     } else {
-        ESP_LOGI(task_tag, "BMI270 is not initialized, skip BMI sleep prep");
+        ESP_LOGI(task_tag, "LSM6DS3TR-C is not initialized, skip IMU sleep prep");
     }
     latest_imu_data = {};
     imu_data_valid = false;
@@ -4580,7 +4548,7 @@ esp_err_t m5_corep4_tool::imu_prepare_for_sleep(bool keep_motion_wake)
         check_pm1(pm1.gpioSetWakeEnable(PYG0_IMU_INT, true), "PM1 GPIO0 wake enable");
         check_pm1(pm1.gpioSetWakeEdge(PYG0_IMU_INT, M5PM1_GPIO_WAKE_FALLING), "PM1 GPIO0 wake edge");
         check_pm1(pm1.irqSetGpioMask(M5PM1_IRQ_GPIO0, M5PM1_IRQ_MASK_DISABLE), "PM1 GPIO0 IRQ unmask");
-        ESP_LOGI(task_tag, "PM1 GPIO0 kept for BMI wake");
+        ESP_LOGI(task_tag, "PM1 GPIO0 kept for IMU motion wake");
     } else {
         check_pm1(pm1.gpioSetWakeEnable(PYG0_IMU_INT, false), "PM1 GPIO0 wake disable");
         check_pm1(pm1.irqSetGpioMask(M5PM1_IRQ_GPIO0, M5PM1_IRQ_MASK_ENABLE), "PM1 GPIO0 IRQ mask");
@@ -4592,15 +4560,15 @@ esp_err_t m5_corep4_tool::imu_prepare_for_sleep(bool keep_motion_wake)
         set_status(StatusParam::IMU_ACC_ENABLED, false, StatusConfigFlag::UPDATE_STATUS);
         set_status(StatusParam::IMU_GYR_ENABLED, false, StatusConfigFlag::UPDATE_STATUS);
         set_status(StatusParam::IMU_MAG_ENABLED, false, StatusConfigFlag::UPDATE_STATUS);
-        ESP_LOGI(task_tag, "PM1 GPIO0 and BMI interrupt disabled for sleep");
+        ESP_LOGI(task_tag, "PM1 GPIO0 and IMU interrupt disabled for sleep");
     }
 
     return first_err;
 }
 
-esp_err_t m5_corep4_tool::imu_read_sensor_data(bmi270_tools::sensor_data_t& data, bool update_status)
+esp_err_t m5_corep4_tool::imu_read_sensor_data(lsm6ds3trc_tools::sensor_data_t& data, bool update_status)
 {
-    if (!bmi270.is_initialized()) {
+    if (!lsm6ds3trc.is_initialized()) {
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -4613,8 +4581,8 @@ esp_err_t m5_corep4_tool::imu_read_sensor_data(bmi270_tools::sensor_data_t& data
 
     data = {};
     xSemaphoreTake(imu_data_mutex, portMAX_DELAY);
-    esp_err_t ret = bmi270.get_sensor_data(data);
-    if (ret == ESP_OK && (data.acc_valid || data.gyr_valid || data.mag_valid)) {
+    esp_err_t ret = lsm6ds3trc.get_sensor_data(data);
+    if (ret == ESP_OK && (data.acc_valid || data.gyr_valid)) {
         latest_imu_data = data;
         imu_data_valid = true;
     }
@@ -4627,7 +4595,7 @@ esp_err_t m5_corep4_tool::imu_read_sensor_data(bmi270_tools::sensor_data_t& data
     return ret;
 }
 
-esp_err_t m5_corep4_tool::imu_get_latest_sensor_data(bmi270_tools::sensor_data_t& data)
+esp_err_t m5_corep4_tool::imu_get_latest_sensor_data(lsm6ds3trc_tools::sensor_data_t& data)
 {
     if (imu_data_mutex == nullptr) {
         return ESP_ERR_INVALID_STATE;
@@ -4645,14 +4613,14 @@ esp_err_t m5_corep4_tool::imu_get_latest_sensor_data(bmi270_tools::sensor_data_t
 
 esp_err_t m5_corep4_tool::imu_clear_interrupt(void)
 {
-    if (!bmi270.is_initialized()) {
+    if (!lsm6ds3trc.is_initialized()) {
         return ESP_ERR_INVALID_STATE;
     }
 
     if (imu_data_mutex != nullptr) {
         xSemaphoreTake(imu_data_mutex, portMAX_DELAY);
     }
-    esp_err_t ret = bmi270.clear_interrupt();
+    esp_err_t ret = lsm6ds3trc.clear_interrupt();
     if (imu_data_mutex != nullptr) {
         xSemaphoreGive(imu_data_mutex);
     }
@@ -4661,10 +4629,10 @@ esp_err_t m5_corep4_tool::imu_clear_interrupt(void)
 
 bool m5_corep4_tool::imu_is_initialized(void) const
 {
-    return bmi270.is_initialized();
+    return lsm6ds3trc.is_initialized();
 }
 
-void m5_corep4_tool::imu_update_status_from_data(const bmi270_tools::sensor_data_t& data,
+void m5_corep4_tool::imu_update_status_from_data(const lsm6ds3trc_tools::sensor_data_t& data,
                                                  StatusConfigFlag flags)
 {
     if (data.acc_valid) {
@@ -4681,12 +4649,6 @@ void m5_corep4_tool::imu_update_status_from_data(const bmi270_tools::sensor_data
         set_status(StatusParam::IMU_GYR_Z, data.gyr_z, flags);
     }
 
-    if (data.mag_valid) {
-        set_status(StatusParam::IMU_MAG_ENABLED, true, flags);
-        set_status(StatusParam::IMU_MAG_X, data.mag_x, flags);
-        set_status(StatusParam::IMU_MAG_Y, data.mag_y, flags);
-        set_status(StatusParam::IMU_MAG_Z, data.mag_z, flags);
-    }
 }
 
 void m5_corep4_tool::imu_service_task(void *pvParameters)
@@ -4696,7 +4658,7 @@ void m5_corep4_tool::imu_service_task(void *pvParameters)
     uint32_t error_count = 0;
 
     while (!self->imu_service_stop_requested) {
-        bmi270_tools::sensor_data_t data{};
+        lsm6ds3trc_tools::sensor_data_t data{};
         esp_err_t ret = self->imu_read_sensor_data(data, true);
         if (ret != ESP_OK && (++error_count % 40) == 1) {
             ESP_LOGW(task_tag, "IMU sample failed: %s", esp_err_to_name(ret));
@@ -4737,7 +4699,7 @@ esp_err_t m5_corep4_tool::lvgl_custom_demo_task(void *pvParameters)
     switch_sensor_display(SENSOR_TYPE_ACC);
 
     // 主循环 - 根据当前选择的传感器类型读取数据并更新波形
-    bmi270_tools::sensor_data_t sens_data{};
+    lsm6ds3trc_tools::sensor_data_t sens_data{};
     
     while (!lvgl_custom_demo_stop_requested) {
         if (lvgl_disp == nullptr || ui_bmichart == nullptr) {
@@ -4750,7 +4712,7 @@ esp_err_t m5_corep4_tool::lvgl_custom_demo_task(void *pvParameters)
             recreate_chart_series();
         }
         
-        // 读取共享IMU缓存，避免界面任务直接访问BMI270/BMM150总线
+        // 读取共享 IMU 缓存，避免界面任务直接访问 LSM6DS3TR-C 总线
         if (this->imu_get_latest_sensor_data(sens_data) == ESP_OK) {
             float sensor_values[3] = {0.0f, 0.0f, 0.0f};
             bool data_valid = false;
@@ -4777,13 +4739,7 @@ esp_err_t m5_corep4_tool::lvgl_custom_demo_task(void *pvParameters)
                     }
                     break;
                 case SENSOR_TYPE_MAG:
-                    if (sens_data.mag_valid) {
-                        sensor_values[0] = (float)sens_data.mag_x;
-                        sensor_values[1] = (float)sens_data.mag_y;
-                        sensor_values[2] = (float)sens_data.mag_z;
-                        data_valid = true;
-                        sensor_name = "MAG";
-                    }
+                    // The LSM6DS3TR-C is a 6-axis device; no magnetometer data.
                     break;
                 default:
                     break;
@@ -6518,17 +6474,17 @@ void m5_corep4_tool::test_low_power_sleep(void)
     device_status.sdcard.sd_free_bytes = 0;
     corep4_sd_detect_disable_for_sleep(pyb);
 
-    // 1. 关闭BMI270 - 直接写寄存器进入休眠模式
-    // PWR_CTRL寄存器(0x7D): bit2=ACC, bit1=GYR, bit0=AUX, 写0x00关闭所有传感器
-    {
-        i2c_bus_device_handle_t bmi270_dev = otool_tools.i2c_tools.get_i2c_device_handle(I2C_BMI270_ADDR);
-        if (bmi270_dev != nullptr) {
-            uint8_t pwr_ctrl_off = 0x00;  // 关闭ACC、GYR、AUX所有传感器
-            i2c_bus_write_byte(bmi270_dev, 0x7D, pwr_ctrl_off);  // 写入PWR_CTRL寄存器
-            ESP_LOGI(TAG, "BMI270 entered suspend mode (PWR_CTRL=0x00)");
+    // 1. 关闭 LSM6DS3TR-C（CTRL1_XL/CTRL2_G ODR = 0）
+    if (lsm6ds3trc.is_initialized()) {
+        const esp_err_t imu_sleep_ret = lsm6ds3trc.prepare_for_sleep(false);
+        if (imu_sleep_ret != ESP_OK) {
+            ESP_LOGW(TAG, "LSM6DS3TR-C low-power convergence failed: %s",
+                     esp_err_to_name(imu_sleep_ret));
         } else {
-            ESP_LOGW(TAG, "BMI270 device not found, skipping...");
+            ESP_LOGI(TAG, "LSM6DS3TR-C entered power-down mode");
         }
+    } else {
+        ESP_LOGW(TAG, "LSM6DS3TR-C not initialized, skipping low-power convergence");
     }
 
     // 2. 关闭RTC中断（RTC芯片本身无法关闭，但可以禁用其中断输出）
