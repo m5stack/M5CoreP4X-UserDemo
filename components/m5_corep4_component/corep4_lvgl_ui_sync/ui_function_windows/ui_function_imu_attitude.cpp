@@ -15,7 +15,10 @@ constexpr float MIN_DELTA_SECONDS = 0.001f;
 constexpr float BOOTSTRAP_STATIONARY_GYRO_DPS = 5.0f;
 constexpr float TRACKING_STATIONARY_GYRO_DPS = 0.25f;
 constexpr float STATIONARY_ACCEL_FRACTION = 0.10f;
-constexpr unsigned GYRO_BIAS_BOOTSTRAP_SAMPLES = 12;
+// At the 10 ms IMU sample period this gives a 600 ms stationary bias
+// calibration window. The previous 12-sample window finished in ~120 ms,
+// which was too short to produce a stable gyro-bias estimate.
+constexpr unsigned GYRO_BIAS_BOOTSTRAP_SAMPLES = 60;
 constexpr float GYRO_BIAS_ALPHA = 0.003f;
 constexpr float INTEGRAL_ERROR_LIMIT = 0.08f;
 constexpr float INTEGRAL_ERROR_DECAY = 0.98f;

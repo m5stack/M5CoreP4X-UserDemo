@@ -9988,7 +9988,7 @@
                   {
                     "nid": 1020,
                     "strtype": "CHECKBOX/Title",
-                    "strval": "BMI_WAKE",
+                    "strval": "IMU_WAKE",
                     "InheritedType": 10
                   },
                   {

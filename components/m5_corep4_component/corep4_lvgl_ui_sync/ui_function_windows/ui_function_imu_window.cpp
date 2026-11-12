@@ -1,4 +1,5 @@
 #include "ui_function_widgets.h"
+#include "ui_function_touch_coords.h"
 
 #include "ui_function_imu_attitude.h"
 #include "ui_function_imu_renderer.h"
@@ -20,6 +21,7 @@ using namespace corep4_function_ui;
 constexpr const char *TAG = "UI_FUNC_IMU";
 constexpr uint32_t IMU_UPDATE_PERIOD_MS = 25;
 constexpr uint32_t IMU_SAMPLE_PERIOD_MS = 10;
+constexpr UBaseType_t IMU_TASK_PRIORITY = 4;
 constexpr int IMU_INIT_FAILURE_CLOSE_MS = 5000;
 constexpr int32_t VIEW_WIDTH = 460;
 constexpr int32_t VIEW_HEIGHT = 418;
@@ -56,6 +58,7 @@ struct ImuPageState {
   bool pose_ready = false;
   bool recenter_requested = false;
   bool calibration_status_visible = false;
+  bool exiting = false;
   TaskHandle_t fusion_task_handle = nullptr;
   volatile bool fusion_stop_requested = false;
 
@@ -125,7 +128,8 @@ bool create_canvas(lv_obj_t *parent) {
   s_imu_page.canvas_stride = draw_buffer ? draw_buffer->header.stride : stride;
   lv_obj_add_event_cb(s_imu_page.canvas, canvas_buffer_delete_event_cb,
                       LV_EVENT_DELETE, buffer);
-  render_device();
+  // Keep the canvas hidden behind the loading overlay. Rendering here blocks
+  // the LVGL task before the open animation starts and causes a visible hitch.
   return true;
 }
 
@@ -191,7 +195,8 @@ void show_calibration_status() {
     return;
   }
   s_imu_page.calibration_status_visible = true;
-  lv_label_set_text(s_imu_page.loading_label, "Calibrating IMU...");
+  lv_label_set_text(s_imu_page.loading_label,
+                    "Keep sensor still\nCalibrating IMU...");
   lv_obj_set_style_text_color(s_imu_page.loading_label,
                               lv_color_hex(COLOR_MUTED), LV_PART_MAIN);
   lv_obj_center(s_imu_page.loading_label);
@@ -229,14 +234,18 @@ void hide_touch_markers() {
   }
 }
 
-void position_touch_marker(size_t index, int32_t screen_x, int32_t screen_y,
-                           const lv_area_t &canvas_area) {
+void position_touch_marker(size_t index, int32_t screen_x, int32_t screen_y) {
   lv_obj_t *marker = s_imu_page.touch_markers[index];
   if (!marker) {
     return;
   }
-  lv_obj_set_pos(marker, screen_x - canvas_area.x1 - TOUCH_MARKER_SIZE / 2,
-                 screen_y - canvas_area.y1 - TOUCH_MARKER_SIZE / 2);
+
+  lv_obj_t *parent = lv_obj_get_parent(marker);
+  lv_area_t parent_content = {};
+  lv_obj_get_content_coords(parent, &parent_content);
+  lv_obj_set_pos(marker,
+                 screen_x - parent_content.x1 - TOUCH_MARKER_SIZE / 2,
+                 screen_y - parent_content.y1 - TOUCH_MARKER_SIZE / 2);
   lv_obj_clear_flag(marker, LV_OBJ_FLAG_HIDDEN);
   lv_obj_move_foreground(marker);
 }
@@ -279,6 +288,9 @@ void update_touch_gesture() {
   if (esp_lcd_touch_get_data(touch, points, &point_count, 2) != ESP_OK) {
     point_count = 0;
   }
+  for (uint8_t i = 0; i < point_count; ++i) {
+    points[i] = ui_touch_point_to_screen(touch, points[i]);
+  }
 
   lv_area_t canvas_area = {};
   lv_obj_get_coords(s_imu_page.canvas, &canvas_area);
@@ -289,7 +301,7 @@ void update_touch_gesture() {
     return;
   }
 
-  position_touch_marker(0, points[0].x, points[0].y, canvas_area);
+  position_touch_marker(0, points[0].x, points[0].y);
   if (point_count == 1) {
     if (s_imu_page.touch_markers[1]) {
       lv_obj_add_flag(s_imu_page.touch_markers[1], LV_OBJ_FLAG_HIDDEN);
@@ -299,8 +311,8 @@ void update_touch_gesture() {
       const float dy = static_cast<float>(points[0].y - s_imu_page.last_touch_y);
       if (dx != 0.0f || dy != 0.0f) {
         apply_view_rotation(corep4_imu_quaternion_from_euler(
-            -dy * TOUCH_DRAG_RADIANS_PER_PIXEL,
-            -dx * TOUCH_DRAG_RADIANS_PER_PIXEL, 0.0f));
+            dy * TOUCH_DRAG_RADIANS_PER_PIXEL,
+            dx * TOUCH_DRAG_RADIANS_PER_PIXEL, 0.0f));
       }
     }
     s_imu_page.touch_mode = TouchGestureMode::Drag;
@@ -309,7 +321,7 @@ void update_touch_gesture() {
     return;
   }
 
-  position_touch_marker(1, points[1].x, points[1].y, canvas_area);
+  position_touch_marker(1, points[1].x, points[1].y);
   const float twist_angle =
       std::atan2(static_cast<float>(points[1].y - points[0].y),
                  static_cast<float>(points[1].x - points[0].x));
@@ -397,19 +409,20 @@ void imu_fusion_task(void *parameter) {
       if (attitude.update(acc_y, acc_x, acc_z, data.acc_valid && acc_valid,
                           -gyr_y, -gyr_x, -gyr_z,
                           data.gyr_valid && gyr_valid, delta_seconds)) {
-        if (take_recenter_request() && acc_valid &&
+        if (attitude.calibrated() && take_recenter_request() && acc_valid &&
             attitude.recenter_from_acceleration(acc_y, acc_x, acc_z)) {
           reference = attitude.orientation();
           reference_valid = true;
           publish_pose({});
-        } else if (!reference_valid && attitude.ready()) {
-          // Show the model after the first valid ACC frame. Gyro bias
-          // calibration keeps converging in the background and must not gate
-          // the whole screen indefinitely.
+        } else if (!reference_valid && attitude.calibrated()) {
+          // Do not reveal the model until the stationary gyro-bias window has
+          // completed. Showing after the first ACC frame made the on-screen
+          // calibration message disappear before calibration was effective.
           attitude.clear_correction();
           reference = attitude.orientation();
           reference_valid = true;
           publish_pose({});
+          ESP_LOGI(TAG, "IMU gyro bias calibration complete; model revealed");
         } else if (reference_valid) {
           const CoreP4ImuQuaternion relative =
               corep4_imu_quaternion_normalize(corep4_imu_quaternion_multiply(
@@ -436,7 +449,7 @@ esp_err_t start_fusion_task(uint32_t generation) {
   const BaseType_t task_result = xTaskCreate(
       imu_fusion_task, "imu_fusion", 4096,
       reinterpret_cast<void *>(static_cast<uintptr_t>(generation)),
-      configMAX_PRIORITIES - 4, &s_imu_page.fusion_task_handle);
+      IMU_TASK_PRIORITY, &s_imu_page.fusion_task_handle);
   if (task_result != pdPASS) {
     s_imu_page.fusion_task_handle = nullptr;
     return ESP_ERR_NO_MEM;
@@ -500,9 +513,9 @@ void imu_timer_cb(lv_timer_t *) {
   if (!ready) {
     return;
   }
-  reveal_canvas();
   if (sequence == s_imu_page.rendered_pose_sequence &&
       s_imu_page.view_sequence == s_imu_page.rendered_view_sequence) {
+    reveal_canvas();
     return;
   }
   s_imu_page.rendered_pose_sequence = sequence;
@@ -510,6 +523,7 @@ void imu_timer_cb(lv_timer_t *) {
   const CoreP4ImuQuaternion displayed = corep4_imu_quaternion_normalize(
       corep4_imu_quaternion_multiply(s_imu_page.view_offset, relative));
   render_device(displayed);
+  reveal_canvas();
 }
 
 void imu_init_task(void *parameter) {
@@ -567,6 +581,39 @@ void imu_content_delete_event_cb(lv_event_t *event) {
   s_imu_page = {};
 }
 
+void imu_exit_event_cb(lv_event_t *event) {
+  if (lv_event_get_code(event) != LV_EVENT_CLICKED || s_imu_page.exiting) {
+    return;
+  }
+  s_imu_page.exiting = true;
+
+  // Stop producing new poses before the close animation. Deleting the canvas or
+  // waiting for the fusion task here would block LVGL and make the animation
+  // visibly stutter.
+  s_imu_page.page_alive = false;
+  s_imu_page.fusion_stop_requested = true;
+  if (s_imu_page.fusion_task_handle) {
+    xTaskNotifyGive(s_imu_page.fusion_task_handle);
+  }
+  if (s_imu_page.timer) {
+    lv_timer_delete(s_imu_page.timer);
+    s_imu_page.timer = nullptr;
+  }
+
+  // Remove the texture-heavy canvas from rendering first, then animate the
+  // remaining lightweight window shell to the Exit button.
+  hide_touch_markers();
+  if (s_imu_page.canvas) {
+    lv_obj_add_flag(s_imu_page.canvas, LV_OBJ_FLAG_HIDDEN);
+  }
+  if (s_imu_page.loading_container) {
+    lv_obj_add_flag(s_imu_page.loading_container, LV_OBJ_FLAG_HIDDEN);
+  }
+
+  auto *exit_button = static_cast<lv_obj_t *>(lv_event_get_target(event));
+  corep4_ui_close_function_window_with_animation(exit_button);
+}
+
 void start_imu(lv_obj_t *parent, const CoreP4FunctionWindowConfig &config) {
   auto *tool = corep4_ui_sync_get_tool();
   if (tool) {
@@ -591,7 +638,7 @@ void start_imu(lv_obj_t *parent, const CoreP4FunctionWindowConfig &config) {
     if (context) {
       const BaseType_t task_result =
           xTaskCreate(imu_init_task, "func_imu_init", 4096, context,
-                      configMAX_PRIORITIES - 4, nullptr);
+                      IMU_TASK_PRIORITY, nullptr);
       if (task_result == pdPASS) {
         return;
       }
@@ -634,7 +681,7 @@ void build_content(lv_obj_t *parent, const CoreP4FunctionWindowConfig &config) {
     s_imu_page.init_failed = true;
   }
   create_loading_overlay(parent);
-  create_touch_markers(parent);
+  create_touch_markers(s_imu_page.canvas ? s_imu_page.canvas : parent);
   start_imu(parent, config);
   s_imu_page.timer =
       lv_timer_create(imu_timer_cb, IMU_UPDATE_PERIOD_MS, nullptr);
@@ -649,6 +696,9 @@ constexpr CoreP4FunctionWindowConfig WINDOW_CONFIG = {
     nullptr,
     COLOR_BUTTON_BG,
     COLOR_TEXT,
+    false,
+    nullptr,
+    imu_exit_event_cb,
 };
 
 } // namespace

@@ -328,19 +328,13 @@ void add_function_window_outline(lv_obj_t* parent)
                          0, 0, dash);
 }
 
-void exit_button_event_cb(lv_event_t* e)
+void animate_close_function_window(lv_obj_t* window, lv_obj_t* exit_btn)
 {
-    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
-        return;
-    }
-
-    auto* window = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
     if (!window) {
         return;
     }
 
     // Get exit button screen coords as closing animation target
-    lv_obj_t* exit_btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
     int16_t target_cx, target_cy;
     if (exit_btn) {
         lv_area_t btn_coords;
@@ -386,6 +380,17 @@ void exit_button_event_cb(lv_event_t* e)
     lv_anim_start(&a);
 
     ESP_LOGI(TAG, "Closing window (anim to %d,%d)", target_cx, target_cy);
+}
+
+void exit_button_event_cb(lv_event_t* e)
+{
+    if (lv_event_get_code(e) != LV_EVENT_CLICKED) {
+        return;
+    }
+
+    auto* window = static_cast<lv_obj_t*>(lv_event_get_user_data(e));
+    auto* exit_btn = static_cast<lv_obj_t*>(lv_event_get_target(e));
+    animate_close_function_window(window, exit_btn);
 }
 
 lv_obj_t* create_backdrop()
@@ -1143,4 +1148,23 @@ void corep4_ui_open_paged_function_window(lv_event_t* e,
 extern "C" bool corep4_ui_has_active_function_window(void)
 {
     return s_active_window != nullptr;
+}
+
+extern "C" void corep4_ui_close_function_window(void)
+{
+    if (!s_active_window) {
+        return;
+    }
+    lv_obj_t* window = s_active_window;
+    if (s_window_anim_ctx) {
+        s_window_anim_ctx->window = nullptr;
+        lv_anim_delete(s_window_anim_ctx, window_anim_exec_cb);
+    }
+    s_active_window = nullptr;
+    lv_obj_delete(window);
+}
+
+extern "C" void corep4_ui_close_function_window_with_animation(lv_obj_t* exit_button)
+{
+    animate_close_function_window(s_active_window, exit_button);
 }

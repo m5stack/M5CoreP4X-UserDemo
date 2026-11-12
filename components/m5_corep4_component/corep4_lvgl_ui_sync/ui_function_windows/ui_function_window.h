@@ -86,6 +86,8 @@ void corep4_ui_set_function_dialog_button_hidden(CoreP4FunctionDialogHandle* dia
 extern "C" {
 #endif
 bool corep4_ui_has_active_function_window(void);
+void corep4_ui_close_function_window(void);
+void corep4_ui_close_function_window_with_animation(lv_obj_t* exit_button);
 #ifdef __cplusplus
 }
 #endif

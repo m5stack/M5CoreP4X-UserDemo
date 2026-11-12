@@ -1,4 +1,5 @@
 #include "ui_function_widgets.h"
+#include "ui_function_touch_coords.h"
 
 #include "esp_check.h"
 #include "esp_heap_caps.h"
@@ -33,6 +34,9 @@ constexpr uint32_t CANVAS_EXIT_BG = 0xD32F2F;
 constexpr uint32_t CANVAS_EXIT_DISABLED_BG = 0x94A3B8;
 constexpr uint32_t CANVAS_IDLE_TIMEOUT_MS = 10000;
 constexpr uint32_t CANVAS_IDLE_CHECK_MS = 500;
+constexpr uint32_t CANVAS_TOUCH_POLL_MS = 16;
+constexpr uint8_t CANVAS_MAX_TOUCH_POINTS = CONFIG_ESP_LCD_TOUCH_MAX_POINTS;
+constexpr int64_t CANVAS_TOUCH_MATCH_DISTANCE_SQ = 120LL * 120LL;
 constexpr int CANVAS_GRID_WIDTH = 3;
 constexpr int CANVAS_CELL_INSET = CANVAS_GRID_WIDTH;
 constexpr int CANVAS_CELL_RADIUS = 8;
@@ -127,6 +131,13 @@ struct TouchPageState {
     lv_obj_t* window_backdrop = nullptr;
 };
 
+struct CanvasTouchPointer {
+    bool active = false;
+    int32_t x = 0;
+    int32_t y = 0;
+    uint16_t raw = 0;
+};
+
 struct CanvasPageState {
     lv_obj_t* overlay = nullptr;
     lv_obj_t* canvas = nullptr;
@@ -135,13 +146,12 @@ struct CanvasPageState {
     lv_obj_t* exit_button = nullptr;
     lv_obj_t* info_button = nullptr;
     lv_timer_t* idle_timer = nullptr;
+    lv_timer_t* touch_timer = nullptr;
     void* buffer = nullptr;
-    lv_point_t last_point = {-1, -1};
+    CanvasTouchPointer pointers[CANVAS_MAX_TOUCH_POINTS] = {};
     uint32_t last_activity_ms = 0;
-    uint16_t current_track_raw = 0;
     bool visited[CANVAS_TOTAL_CELLS] = {};
     uint8_t visited_count = 0;
-    bool is_drawing = false;
     bool closing = false;
 };
 
@@ -422,12 +432,11 @@ void refresh_touch_status()
 
 void reset_canvas_runtime()
 {
-    s_canvas_page.last_point.x = -1;
-    s_canvas_page.last_point.y = -1;
     s_canvas_page.last_activity_ms = lv_tick_get();
-    s_canvas_page.current_track_raw = to_rgb565_raw(random_canvas_track_color());
+    for (CanvasTouchPointer& pointer : s_canvas_page.pointers) {
+        pointer = {};
+    }
     s_canvas_page.visited_count = 0;
-    s_canvas_page.is_drawing = false;
     for (bool& visited : s_canvas_page.visited) {
         visited = false;
     }
@@ -594,6 +603,10 @@ void canvas_overlay_delete_event_cb(lv_event_t* e)
         lv_timer_delete(s_canvas_page.idle_timer);
         s_canvas_page.idle_timer = nullptr;
     }
+    if (s_canvas_page.touch_timer) {
+        lv_timer_delete(s_canvas_page.touch_timer);
+        s_canvas_page.touch_timer = nullptr;
+    }
 
     s_canvas_page = CanvasPageState{};
 }
@@ -726,6 +739,139 @@ void draw_canvas_brush_line(int32_t x0, int32_t y0, int32_t x1, int32_t y1, uint
     }
 }
 
+bool canvas_touch_over_control(const esp_lcd_touch_point_data_t& point)
+{
+    lv_obj_t* controls[] = {
+        s_canvas_page.progress_label,
+        s_canvas_page.info_button,
+        s_canvas_page.clean_button,
+        s_canvas_page.exit_button,
+    };
+    for (lv_obj_t* obj : controls) {
+        if (!obj || lv_obj_has_flag(obj, LV_OBJ_FLAG_HIDDEN)) {
+            continue;
+        }
+        lv_area_t area = {};
+        lv_obj_get_coords(obj, &area);
+        if (point.x >= area.x1 && point.x <= area.x2 &&
+            point.y >= area.y1 && point.y <= area.y2) {
+            return true;
+        }
+    }
+    return false;
+}
+
+int64_t canvas_touch_distance_sq(int32_t ax, int32_t ay, int32_t bx, int32_t by)
+{
+    const int64_t dx = static_cast<int64_t>(ax) - bx;
+    const int64_t dy = static_cast<int64_t>(ay) - by;
+    return dx * dx + dy * dy;
+}
+
+void invalidate_canvas_dirty()
+{
+    if (!s_canvas_dirty.valid || !s_canvas_page.canvas) {
+        return;
+    }
+    lv_area_t area = {};
+    area.x1 = s_canvas_dirty.x1;
+    area.y1 = s_canvas_dirty.y1;
+    area.x2 = s_canvas_dirty.x2;
+    area.y2 = s_canvas_dirty.y2;
+    lv_obj_invalidate_area(s_canvas_page.canvas, &area);
+    s_canvas_dirty.reset();
+}
+
+void canvas_touch_poll_cb(lv_timer_t*)
+{
+    if (!s_canvas_page.overlay || !s_canvas_page.canvas ||
+        s_canvas_page.closing ||
+        lv_obj_has_flag(s_canvas_page.overlay, LV_OBJ_FLAG_HIDDEN)) {
+        return;
+    }
+
+    auto* tool = corep4_ui_sync_get_tool();
+    esp_lcd_touch_handle_t touch = tool ? tool->get_touch_handle() : nullptr;
+    esp_lcd_touch_point_data_t points[CANVAS_MAX_TOUCH_POINTS] = {};
+    uint8_t point_count = 0;
+    if (!touch ||
+        esp_lcd_touch_get_data(touch,
+                               points,
+                               &point_count,
+                               CANVAS_MAX_TOUCH_POINTS) != ESP_OK) {
+        point_count = 0;
+    }
+    for (uint8_t i = 0; i < point_count; ++i) {
+        points[i] = ui_touch_point_to_screen(touch, points[i]);
+    }
+
+    lv_area_t canvas_area = {};
+    lv_obj_get_coords(s_canvas_page.canvas, &canvas_area);
+
+    CanvasTouchPointer next[CANVAS_MAX_TOUCH_POINTS] = {};
+    bool previous_used[CANVAS_MAX_TOUCH_POINTS] = {};
+    bool activity = false;
+    s_canvas_dirty.reset();
+
+    for (uint8_t i = 0; i < point_count; ++i) {
+        if (canvas_touch_over_control(points[i])) {
+            continue;
+        }
+
+        const int32_t x = clamp_int(points[i].x - canvas_area.x1,
+                                    0,
+                                    CANVAS_WIDTH - 1);
+        const int32_t y = clamp_int(points[i].y - canvas_area.y1,
+                                    0,
+                                    CANVAS_HEIGHT - 1);
+
+        int best_index = -1;
+        int64_t best_distance = CANVAS_TOUCH_MATCH_DISTANCE_SQ;
+        for (uint8_t previous = 0; previous < CANVAS_MAX_TOUCH_POINTS; ++previous) {
+            if (!s_canvas_page.pointers[previous].active ||
+                previous_used[previous]) {
+                continue;
+            }
+            const int64_t distance = canvas_touch_distance_sq(
+                s_canvas_page.pointers[previous].x,
+                s_canvas_page.pointers[previous].y,
+                x,
+                y);
+            if (distance < best_distance) {
+                best_distance = distance;
+                best_index = previous;
+            }
+        }
+
+        if (best_index >= 0) {
+            previous_used[best_index] = true;
+            next[i].raw = s_canvas_page.pointers[best_index].raw;
+            draw_canvas_brush_line(s_canvas_page.pointers[best_index].x,
+                                   s_canvas_page.pointers[best_index].y,
+                                   x,
+                                   y,
+                                   next[i].raw);
+        } else {
+            next[i].raw = to_rgb565_raw(random_canvas_track_color());
+            draw_canvas_brush_stamp(x, y, next[i].raw);
+        }
+        next[i].active = true;
+        next[i].x = x;
+        next[i].y = y;
+        activity = true;
+    }
+
+    for (uint8_t i = 0; i < CANVAS_MAX_TOUCH_POINTS; ++i) {
+        s_canvas_page.pointers[i] = next[i];
+    }
+
+    if (activity) {
+        reset_canvas_idle_activity();
+    }
+    refresh_canvas_progress_label_color();
+    invalidate_canvas_dirty();
+}
+
 void canvas_touch_event_cb(lv_event_t* e)
 {
     const lv_event_code_t code = lv_event_get_code(e);
@@ -735,67 +881,9 @@ void canvas_touch_event_cb(lv_event_t* e)
         return;
     }
 
-    if (!s_canvas_page.canvas) {
-        return;
-    }
-
-    if (code != LV_EVENT_PRESSED &&
-        code != LV_EVENT_PRESSING &&
-        code != LV_EVENT_RELEASED &&
-        code != LV_EVENT_PRESS_LOST) {
-        return;
-    }
-
-    reset_canvas_idle_activity();
-
-    lv_indev_t* indev = lv_indev_active();
-    if (!indev) {
-        return;
-    }
-
-    lv_point_t point;
-    lv_indev_get_point(indev, &point);
-    point.x = clamp_int(point.x, 0, CANVAS_WIDTH - 1);
-    point.y = clamp_int(point.y, 0, CANVAS_HEIGHT - 1);
-
-    if (code == LV_EVENT_PRESSED) {
-        s_canvas_dirty.reset();
-        s_canvas_page.is_drawing = true;
-        s_canvas_page.last_point = point;
-        s_canvas_page.current_track_raw = to_rgb565_raw(random_canvas_track_color());
-        draw_canvas_brush_stamp(point.x, point.y, s_canvas_page.current_track_raw);
-    } else if (code == LV_EVENT_PRESSING) {
-        s_canvas_dirty.reset();
-        if (s_canvas_page.is_drawing &&
-            s_canvas_page.last_point.x >= 0 &&
-            s_canvas_page.last_point.y >= 0) {
-            draw_canvas_brush_line(s_canvas_page.last_point.x,
-                                   s_canvas_page.last_point.y,
-                                   point.x,
-                                   point.y,
-                                   s_canvas_page.current_track_raw);
-        } else {
-            s_canvas_page.is_drawing = true;
-            s_canvas_page.current_track_raw = to_rgb565_raw(random_canvas_track_color());
-            draw_canvas_brush_stamp(point.x, point.y, s_canvas_page.current_track_raw);
-        }
-        s_canvas_page.last_point = point;
-    } else {
-        s_canvas_page.is_drawing = false;
-        s_canvas_page.last_point.x = -1;
-        s_canvas_page.last_point.y = -1;
-    }
-
-    refresh_canvas_progress_label_color();
-
-    if (s_canvas_dirty.valid && s_canvas_page.canvas) {
-        lv_area_t a;
-        a.x1 = s_canvas_dirty.x1;
-        a.y1 = s_canvas_dirty.y1;
-        a.x2 = s_canvas_dirty.x2;
-        a.y2 = s_canvas_dirty.y2;
-        lv_obj_invalidate_area(s_canvas_page.canvas, &a);
-        s_canvas_dirty.reset();
+    if (code == LV_EVENT_PRESSED || code == LV_EVENT_PRESSING ||
+        code == LV_EVENT_RELEASED || code == LV_EVENT_PRESS_LOST) {
+        reset_canvas_idle_activity();
     }
 }
 
@@ -973,6 +1061,7 @@ void open_canvas_page()
     s_canvas_page.clean_button = create_canvas_clean_button(overlay);
     s_canvas_page.exit_button = create_canvas_exit_button(overlay);
     s_canvas_page.idle_timer = lv_timer_create(canvas_idle_timer_cb, CANVAS_IDLE_CHECK_MS, nullptr);
+    s_canvas_page.touch_timer = lv_timer_create(canvas_touch_poll_cb, CANVAS_TOUCH_POLL_MS, nullptr);
     update_canvas_progress();
     lv_obj_move_foreground(overlay);
 }
