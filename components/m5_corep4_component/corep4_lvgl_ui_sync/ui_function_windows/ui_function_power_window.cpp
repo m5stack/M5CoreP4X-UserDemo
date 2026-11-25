@@ -1655,6 +1655,9 @@ lv_obj_t* add_m5bus_pin_card(lv_obj_t* parent, const M5BusPinDef* pin)
 
     lv_obj_t* signal_area = lv_obj_create(cell);
     lv_obj_remove_flag(signal_area, LV_OBJ_FLAG_SCROLLABLE);
+    // This is a visual wrapper over most of the pin card. Keep it non-clickable
+    // so taps anywhere on the GPIO card reach the parent button.
+    lv_obj_remove_flag(signal_area, LV_OBJ_FLAG_CLICKABLE);
     lv_obj_set_pos(signal_area, 0, signal_two_line ? M5BUS_SIGNAL_AREA_TWO_LINE_Y : M5BUS_SIGNAL_AREA_Y);
     lv_obj_set_size(signal_area, lv_pct(100), M5BUS_SIGNAL_AREA_HEIGHT);
     lv_obj_set_style_bg_opa(signal_area, LV_OPA_TRANSP, LV_PART_MAIN);
@@ -1679,6 +1682,7 @@ lv_obj_t* add_m5bus_pin_card(lv_obj_t* parent, const M5BusPinDef* pin)
     if (pin->kind == M5BusPinKind::GPIO) {
         lv_obj_t* level_indicator = lv_obj_create(cell);
         lv_obj_remove_flag(level_indicator, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_remove_flag(level_indicator, LV_OBJ_FLAG_CLICKABLE);
         lv_obj_set_size(level_indicator,
                         M5BUS_LEVEL_INDICATOR_SIZE,
                         M5BUS_LEVEL_INDICATOR_SIZE);
