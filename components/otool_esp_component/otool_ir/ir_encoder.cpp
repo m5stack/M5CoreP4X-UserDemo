@@ -135,7 +135,9 @@ esp_err_t ir_encoder_send(ir_encoder_context *ctx,
             scan_code.command = static_cast<uint16_t>(request.command & 0xFFFFu);
 
             rmt_transmit_config_t config = {};
-            config.loop_count = request.is_repeat ? 1 : 0;
+            // ESP-IDF 6.x normalizes loop_count=1 to 0 (one frame).
+            // "Repeat x2" therefore needs an explicit count of two.
+            config.loop_count = request.is_repeat ? 2 : 0;
             return rmt_transmit(channel, encoder, &scan_code, sizeof(scan_code), &config);
         }
         case ir_format_t::RC5: {
