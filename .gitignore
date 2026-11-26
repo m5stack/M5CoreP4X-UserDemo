@@ -62,3 +62,5 @@ bin/
 obj/
 
 *.code-workspace
+tests/
+example/

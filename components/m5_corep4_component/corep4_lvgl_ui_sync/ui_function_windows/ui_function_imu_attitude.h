@@ -35,5 +35,6 @@ private:
   float gyro_bias_dps_[3] = {};
   float gravity_norm_ = 0.0f;
   unsigned gyro_bias_samples_ = 0;
+  unsigned calibration_attempts_ = 0;
   bool ready_ = false;
 };

@@ -2,9 +2,9 @@
 #include "audio_recorder.h"
 #include "audio_tools.h"
 
-#include "esp_spiffs.h"
 #include "esp_heap_caps.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cerrno>
 #include <cstdio>
@@ -18,14 +18,10 @@ namespace {
 using namespace corep4_function_ui;
 
 constexpr const char* TAG = "UI_FUNC_REC";
-constexpr const char* STORAGE_PARTITION_LABEL = "storage";
-constexpr const char* STORAGE_BASE_PATH       = "/webspiffs";
-constexpr const char* REC_OUTPUT_FILE         = "/webspiffs/REC.PCM";
-constexpr size_t      STORAGE_RESERVE_BYTES   = 32 * 1024;
 
-constexpr uint32_t MONITOR_PERIOD_MS = 50;  ///< LVGL 刷新定时器周期（ms）
-constexpr uint32_t MONITOR_CHUNK_MS  = 40;  ///< 每次 I2S 读取的时长（ms）
-constexpr uint32_t MONITOR_LOG_PERIOD_MS = 1000; ///< MIC 统计日志周期（ms）
+constexpr uint32_t MONITOR_PERIOD_MS = 80;  ///< LVGL 刷新定时器周期（ms）
+constexpr uint32_t MONITOR_CHUNK_MS  = 20;  ///< 每次 I2S 读取的时长（ms）
+constexpr uint32_t MONITOR_LOG_PERIOD_MS = 0; ///< Disable periodic serial logging in monitor mode.
 
 // 波形图配置
 constexpr int32_t  N_WAVE_PTS       = 200;  ///< 每通道波形历史点数（每次刷新 4 点，约 2.5s）
@@ -42,6 +38,7 @@ constexpr int32_t  SPEC_CANVAS_H    = 112;  ///< 频谱画布高度
 constexpr int32_t  SPEC_COL_W       = 1;    ///< 每次刷新写入 1px 频谱列
 constexpr double   SPEC_PI = 3.14159265358979323846;
 constexpr uint32_t REC_MAX_SECONDS = 10;
+constexpr size_t REC_PREVIEW_MAX_CHUNKS = 64;
 
 struct SpectrumTables {
     double cos_tbl[N_SPEC_BINS][SPEC_DFT_N];
@@ -102,7 +99,9 @@ enum class RecDisplayMode : uint8_t {
 enum class RecSessionState : uint8_t {
     IDLE,
     RECORDING,
+    FINALIZING,
     RECORDED,
+    PREPARING_PLAY,
     PLAYING,
 };
 
@@ -163,11 +162,12 @@ struct RecPageState {
     volatile bool discard_record_requested = false;
     RecSessionState session_state = RecSessionState::IDLE;
     uint32_t sequence = 0;
-    char last_path[96] = {};
+    uint8_t* recorded_pcm = nullptr;
     size_t last_record_bytes = 0;
     uint32_t last_record_sample_rate = 0;
     audio_channels_t last_record_channels = AUDIO_CHANNELS_STEREO;
     i2s_data_bit_width_t last_record_bits = I2S_DATA_BIT_WIDTH_16BIT;
+    bool last_record_tdm = false;
     RecDisplayMode display_mode = RecDisplayMode::WAVEFORM;
     bool show_ref = false;
     int16_t recorded_wave_y[3][WAVE_REC_PREVIEW_PTS] = {};
@@ -178,53 +178,17 @@ struct RecPageState {
     TickType_t playback_start_tick = 0;
     uint32_t playback_duration_ms = 0;
     bool playback_wave_active = false;
+    TickType_t recording_start_tick = 0;
+    uint32_t recording_duration_seconds = 0;
+    uint32_t recording_displayed_remaining = UINT32_MAX;
     CoreP4FunctionDialogHandle settings_dialog = {};
 };
 
 RecPageState s_rec_page;
 
-esp_err_t ensure_rec_storage_mounted()
+bool has_recorded_pcm()
 {
-    if (esp_spiffs_mounted(STORAGE_PARTITION_LABEL)) {
-        return ESP_OK;
-    }
-
-    esp_vfs_spiffs_conf_t conf = {
-        .base_path = STORAGE_BASE_PATH,
-        .partition_label = STORAGE_PARTITION_LABEL,
-        .max_files = 8,
-        .format_if_mount_failed = false,
-    };
-
-    esp_err_t ret = esp_vfs_spiffs_register(&conf);
-    if (ret == ESP_ERR_INVALID_STATE && esp_spiffs_mounted(STORAGE_PARTITION_LABEL)) {
-        return ESP_OK;
-    }
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "Failed to mount storage SPIFFS: %s", esp_err_to_name(ret));
-        return ret;
-    }
-
-    size_t total = 0;
-    size_t used = 0;
-    ret = esp_spiffs_info(STORAGE_PARTITION_LABEL, &total, &used);
-    if (ret == ESP_OK) {
-        ESP_LOGI(TAG, "Mounted storage SPIFFS at %s: total=%u used=%u",
-                 STORAGE_BASE_PATH,
-                 static_cast<unsigned>(total),
-                 static_cast<unsigned>(used));
-    } else {
-        ESP_LOGW(TAG, "Mounted storage SPIFFS, but info failed: %s", esp_err_to_name(ret));
-    }
-    return ESP_OK;
-}
-
-esp_err_t get_rec_storage_info(size_t* total, size_t* used)
-{
-    if (!esp_spiffs_mounted(STORAGE_PARTITION_LABEL)) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    return esp_spiffs_info(STORAGE_PARTITION_LABEL, total, used);
+    return s_rec_page.recorded_pcm != nullptr && s_rec_page.last_record_bytes > 0;
 }
 
 void log_mic_monitor_stats(const MicMonitorStats stats[4], size_t samples_per_channel)
@@ -256,13 +220,6 @@ void log_mic_monitor_stats(const MicMonitorStats stats[4], size_t samples_per_ch
     }
 
     ESP_LOGI(TAG, "%s", line);
-}
-
-void delete_rec_output_file()
-{
-    if (std::remove(REC_OUTPUT_FILE) == 0) {
-        ESP_LOGI(TAG, "Deleted previous REC file: %s", REC_OUTPUT_FILE);
-    }
 }
 
 void set_rec_result_text(const char* text, uint32_t color)
@@ -370,7 +327,9 @@ const char* rec_session_state_name(RecSessionState state)
     switch (state) {
         case RecSessionState::IDLE: return "idle";
         case RecSessionState::RECORDING: return "recording";
+        case RecSessionState::FINALIZING: return "finalizing";
         case RecSessionState::RECORDED: return "recorded";
+        case RecSessionState::PREPARING_PLAY: return "preparing_play";
         case RecSessionState::PLAYING: return "playing";
         default: return "unknown";
     }
@@ -427,14 +386,16 @@ void clear_recorded_wave_cache()
 
 void clear_record_file_state(bool delete_file)
 {
-    if (delete_file) {
-        delete_rec_output_file();
+    (void)delete_file;
+    if (s_rec_page.recorded_pcm) {
+        heap_caps_free(s_rec_page.recorded_pcm);
+        s_rec_page.recorded_pcm = nullptr;
     }
-    s_rec_page.last_path[0] = '\0';
     s_rec_page.last_record_bytes = 0;
     s_rec_page.last_record_sample_rate = 0;
     s_rec_page.last_record_channels = AUDIO_CHANNELS_STEREO;
     s_rec_page.last_record_bits = I2S_DATA_BIT_WIDTH_16BIT;
+    s_rec_page.last_record_tdm = false;
     clear_recorded_wave_cache();
 }
 
@@ -695,11 +656,12 @@ bool build_recorded_wave_preview_from_buffer(const uint8_t* buffer,
     fs.channel = 2;
     fs.bits_per_sample = static_cast<uint8_t>(bits);
 
-    for (size_t offset = 0; offset < bytes;) {
-        size_t to_process = bytes - offset;
-        if (to_process > chunk_size) {
-            to_process = chunk_size;
-        }
+    const size_t total_chunks = (bytes + chunk_size - 1) / chunk_size;
+    const size_t chunk_stride =
+        std::max<size_t>(1, total_chunks / REC_PREVIEW_MAX_CHUNKS);
+    for (size_t chunk_index = 0; chunk_index < total_chunks; chunk_index += chunk_stride) {
+        const size_t offset = chunk_index * chunk_size;
+        size_t to_process = std::min(chunk_size, bytes - offset);
         if (frame_bytes && to_process > frame_bytes) {
             to_process -= to_process % frame_bytes;
         }
@@ -707,6 +669,7 @@ bool build_recorded_wave_preview_from_buffer(const uint8_t* buffer,
             break;
         }
 
+        sample_offset = split_samples_per_channel_from_bytes(offset, bits);
         consume_recorded_wave_chunk(buffer + offset,
                                     to_process,
                                     total_samples,
@@ -717,166 +680,9 @@ bool build_recorded_wave_preview_from_buffer(const uint8_t* buffer,
                                     preview_samples,
                                     preview_abs,
                                     preview_peak);
-        offset += to_process;
     }
 
     finalize_recorded_wave_preview(preview_samples, preview_peak);
-    return true;
-}
-
-bool build_recorded_wave_preview_from_file(const char* path,
-                                           size_t bytes,
-                                           uint32_t sample_rate,
-                                           i2s_data_bit_width_t bits,
-                                           bool is_tdm,
-                                           audio_mic_channel_t mic_mask)
-{
-    clear_recorded_wave_cache();
-    if (!path || bytes == 0 || sample_rate == 0) {
-        return false;
-    }
-
-    FILE* file = fopen(path, "rb");
-    if (!file) {
-        return false;
-    }
-
-    const size_t total_samples = split_samples_per_channel_from_bytes(bytes, bits);
-    if (total_samples == 0) {
-        fclose(file);
-        return false;
-    }
-
-    const size_t bytes_per_sample = static_cast<size_t>(bits) / 8;
-    const size_t frame_bytes = bytes_per_sample * 2;
-    size_t chunk_size = 4096;
-    chunk_size -= frame_bytes ? (chunk_size % frame_bytes) : 0;
-    if (chunk_size == 0) {
-        chunk_size = frame_bytes ? frame_bytes : 512;
-    }
-
-    uint8_t* chunk = static_cast<uint8_t*>(malloc(chunk_size));
-    if (!chunk) {
-        fclose(file);
-        return false;
-    }
-
-    int16_t preview_samples[3][WAVE_REC_PREVIEW_PTS] = {};
-    int32_t preview_abs[3][WAVE_REC_PREVIEW_PTS] = {};
-    int32_t preview_peak[3] = {};
-    size_t sample_offset = 0;
-    size_t remaining = bytes;
-
-    esp_codec_dev_sample_info_t fs = {};
-    fs.sample_rate = sample_rate;
-    fs.channel = 2;
-    fs.bits_per_sample = static_cast<uint8_t>(bits);
-
-    while (remaining > 0) {
-        size_t to_read = remaining < chunk_size ? remaining : chunk_size;
-        if (frame_bytes && to_read > frame_bytes) {
-            to_read -= to_read % frame_bytes;
-        }
-        if (to_read == 0) {
-            break;
-        }
-
-        const size_t got = fread(chunk, 1, to_read, file);
-        if (got == 0) {
-            break;
-        }
-
-        consume_recorded_wave_chunk(chunk,
-                                    got,
-                                    total_samples,
-                                    &sample_offset,
-                                    fs,
-                                    is_tdm,
-                                    mic_mask,
-                                    preview_samples,
-                                    preview_abs,
-                                    preview_peak);
-        remaining -= got;
-    }
-
-    free(chunk);
-    fclose(file);
-
-    finalize_recorded_wave_preview(preview_samples, preview_peak);
-    return sample_offset > 0;
-}
-
-size_t file_size_bytes(const char* path)
-{
-    if (!path) {
-        return 0;
-    }
-
-    FILE* file = fopen(path, "rb");
-    if (!file) {
-        return 0;
-    }
-
-    if (fseek(file, 0, SEEK_END) != 0) {
-        fclose(file);
-        return 0;
-    }
-
-    const long pos = ftell(file);
-    fclose(file);
-    return pos > 0 ? static_cast<size_t>(pos) : 0;
-}
-
-bool restore_record_file_from_storage()
-{
-    const esp_err_t storage_ret = ensure_rec_storage_mounted();
-    if (storage_ret != ESP_OK) {
-        clear_record_file_state(false);
-        s_rec_page.session_state = RecSessionState::IDLE;
-        return false;
-    }
-
-    const size_t bytes = file_size_bytes(REC_OUTPUT_FILE);
-    if (bytes == 0) {
-        clear_record_file_state(false);
-        s_rec_page.session_state = RecSessionState::IDLE;
-        return false;
-    }
-
-    auto* tool = corep4_ui_sync_get_tool();
-    if (!tool) {
-        clear_record_file_state(false);
-        s_rec_page.session_state = RecSessionState::IDLE;
-        return false;
-    }
-
-    std::snprintf(s_rec_page.last_path, sizeof(s_rec_page.last_path), "%s", REC_OUTPUT_FILE);
-    s_rec_page.last_record_bytes = bytes;
-    s_rec_page.last_record_sample_rate = tool->otool_tools.audio.get_sample_rate();
-    s_rec_page.last_record_channels =
-        (tool->otool_tools.audio.get_rx_channels() == AUDIO_CHANNELS_MONO)
-            ? AUDIO_CHANNELS_MONO
-            : AUDIO_CHANNELS_STEREO;
-    s_rec_page.last_record_bits = tool->otool_tools.audio.get_bits_per_sample();
-    s_rec_page.playback_duration_ms =
-        record_duration_ms_from_bytes(s_rec_page.last_record_bytes,
-                                      s_rec_page.last_record_sample_rate,
-                                      s_rec_page.last_record_channels,
-                                      s_rec_page.last_record_bits);
-
-    const audio_mic_channel_t target_mask =
-        static_cast<audio_mic_channel_t>(AUDIO_MIC_CHANNEL_1 |
-                                          AUDIO_MIC_CHANNEL_2 |
-                                          AUDIO_MIC_CHANNEL_3);
-    const audio_mic_channel_t eff_mask =
-        static_cast<audio_mic_channel_t>(tool->otool_tools.audio.get_mic_channels() & target_mask);
-    build_recorded_wave_preview_from_file(s_rec_page.last_path,
-                                          s_rec_page.last_record_bytes,
-                                          s_rec_page.last_record_sample_rate,
-                                          s_rec_page.last_record_bits,
-                                          tool->otool_tools.audio.is_es7210_tdm_mode(),
-                                          eff_mask);
-    s_rec_page.session_state = RecSessionState::RECORDED;
     return true;
 }
 
@@ -968,6 +774,56 @@ int16_t load_i16_le(const uint8_t* p)
 {
     return static_cast<int16_t>(static_cast<uint16_t>(p[0]) |
                                 (static_cast<uint16_t>(p[1]) << 8));
+}
+
+bool build_playable_pcm_from_tdm(const uint8_t* raw,
+                                 size_t raw_bytes,
+                                 uint8_t*& playback_pcm,
+                                 size_t& playback_bytes)
+{
+    playback_pcm = nullptr;
+    playback_bytes = 0;
+
+    constexpr size_t TDM_FRAME_BYTES = sizeof(uint32_t) * 2;
+    constexpr size_t PCM16_STEREO_FRAME_BYTES = sizeof(int16_t) * 2;
+    if (!raw || raw_bytes < TDM_FRAME_BYTES || raw_bytes % TDM_FRAME_BYTES != 0) {
+        ESP_LOGE(TAG, "Invalid TDM recording size: %u bytes", static_cast<unsigned>(raw_bytes));
+        return false;
+    }
+
+    const size_t frame_count = raw_bytes / TDM_FRAME_BYTES;
+    playback_bytes = frame_count * PCM16_STEREO_FRAME_BYTES;
+    playback_pcm = static_cast<uint8_t*>(
+        heap_caps_malloc(playback_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!playback_pcm) {
+        playback_pcm = static_cast<uint8_t*>(heap_caps_malloc(playback_bytes, MALLOC_CAP_8BIT));
+    }
+    if (!playback_pcm) {
+        ESP_LOGE(TAG, "Failed to allocate playback PCM: %u bytes",
+                 static_cast<unsigned>(playback_bytes));
+        playback_bytes = 0;
+        return false;
+    }
+
+    for (size_t frame = 0; frame < frame_count; ++frame) {
+        const uint32_t left_word = load_u32_le(raw + frame * TDM_FRAME_BYTES);
+        const uint32_t right_word = load_u32_le(raw + frame * TDM_FRAME_BYTES + sizeof(uint32_t));
+        const int16_t left = static_cast<int16_t>(left_word >> 16);
+        const int16_t right = static_cast<int16_t>(right_word >> 16);
+        std::memcpy(playback_pcm + frame * PCM16_STEREO_FRAME_BYTES,
+                    &left,
+                    sizeof(left));
+        std::memcpy(playback_pcm + frame * PCM16_STEREO_FRAME_BYTES + sizeof(left),
+                    &right,
+                    sizeof(right));
+    }
+
+    ESP_LOGI(TAG,
+             "Converted TDM recording for playback: %u -> %u bytes, %u frames",
+             static_cast<unsigned>(raw_bytes),
+             static_cast<unsigned>(playback_bytes),
+             static_cast<unsigned>(frame_count));
+    return true;
 }
 
 void init_raw_metrics(RecRawMetrics& metrics, size_t samples_per_channel)
@@ -1403,33 +1259,49 @@ void compute_spectrum_levels(const int16_t* samples, size_t count, volatile uint
 void set_record_buttons_enabled(bool enabled)
 {
     const bool busy_stopping = s_rec_page.stop_requested || s_rec_page.stop_play_requested;
-    const bool has_record = s_rec_page.last_record_bytes > 0 && s_rec_page.last_path[0] != '\0';
+    const bool has_record = has_recorded_pcm();
+    const bool preparing_play = s_rec_page.session_state == RecSessionState::PREPARING_PLAY;
+    const bool finalizing = s_rec_page.session_state == RecSessionState::FINALIZING;
 
     if (s_rec_page.rec_button) {
-        if (s_rec_page.session_state == RecSessionState::IDLE && !s_rec_page.task_running && !has_record) {
+        if (finalizing || busy_stopping || preparing_play) {
+            set_button_text(s_rec_page.rec_button,
+                            finalizing ? "SAVING..." : (busy_stopping ? "ENDING..." : "REC"));
+            set_button_colors(s_rec_page.rec_button, COLOR_BUTTON_BG, COLOR_TEXT);
+            set_button_enabled(s_rec_page.rec_button, false);
+        } else if (s_rec_page.session_state == RecSessionState::IDLE && !s_rec_page.task_running && !has_record) {
             set_button_text(s_rec_page.rec_button, "REC");
             set_button_colors(s_rec_page.rec_button,
                               enabled && !s_rec_page.play_running ? COLOR_PRIMARY : COLOR_BUTTON_BG,
                               enabled && !s_rec_page.play_running ? 0xFFFFFF : COLOR_TEXT);
             set_button_enabled(s_rec_page.rec_button, enabled && !s_rec_page.play_running);
-        } else if (busy_stopping) {
-            set_button_text(s_rec_page.rec_button, "ENDING...");
-            set_button_colors(s_rec_page.rec_button, COLOR_WARNING, 0xFFFFFF);
-            set_button_enabled(s_rec_page.rec_button, false);
+        } else if (has_record && !s_rec_page.task_running && !s_rec_page.play_running) {
+            set_button_text(s_rec_page.rec_button, "REC");
+            set_button_colors(s_rec_page.rec_button, COLOR_PRIMARY, 0xFFFFFF);
+            set_button_enabled(s_rec_page.rec_button, true);
         } else {
             set_button_text(s_rec_page.rec_button, "END REC");
             set_button_colors(s_rec_page.rec_button, COLOR_ERROR, 0xFFFFFF);
-            set_button_enabled(s_rec_page.rec_button, true);
+            set_button_enabled(s_rec_page.rec_button,
+                               s_rec_page.task_running &&
+                                   s_rec_page.session_state == RecSessionState::RECORDING);
         }
     }
 
     if (s_rec_page.play_button) {
-        if (s_rec_page.session_state == RecSessionState::PLAYING || s_rec_page.play_running) {
+        if (finalizing) {
+            set_button_text(s_rec_page.play_button, "PLAY LAST");
+            set_button_colors(s_rec_page.play_button, COLOR_BUTTON_BG, COLOR_TEXT);
+            set_button_enabled(s_rec_page.play_button, false);
+        } else if (preparing_play) {
+            set_button_text(s_rec_page.play_button, "PREPARING...");
+            set_button_colors(s_rec_page.play_button, PLAY_ACTIVE_COLOR, 0xFFFFFF);
+            set_button_enabled(s_rec_page.play_button, false);
+        } else if (s_rec_page.session_state == RecSessionState::PLAYING || s_rec_page.play_running) {
             set_button_text(s_rec_page.play_button, "END PLAY");
             set_button_colors(s_rec_page.play_button, PLAY_ACTIVE_COLOR, 0xFFFFFF);
             set_button_enabled(s_rec_page.play_button, !busy_stopping);
-        } else if (has_record && s_rec_page.session_state == RecSessionState::RECORDED &&
-                   !s_rec_page.task_running) {
+        } else if (has_record && !s_rec_page.task_running && !s_rec_page.play_running) {
             set_button_text(s_rec_page.play_button, "PLAY LAST");
             set_button_colors(s_rec_page.play_button, COLOR_PRIMARY, 0xFFFFFF);
             set_button_enabled(s_rec_page.play_button, enabled);
@@ -1535,6 +1407,34 @@ void apply_rec_display_mode()
     apply_ref_visibility();
 }
 
+void update_recording_countdown()
+{
+    if (!s_rec_page.task_running || s_rec_page.stop_requested ||
+        !s_rec_page.rec_button || s_rec_page.recording_start_tick == 0 ||
+        s_rec_page.recording_duration_seconds == 0) {
+        return;
+    }
+
+    const uint32_t elapsed_seconds =
+        pdTICKS_TO_MS(xTaskGetTickCount() - s_rec_page.recording_start_tick) / 1000U;
+    const uint32_t remaining =
+        elapsed_seconds >= s_rec_page.recording_duration_seconds
+            ? 0
+            : s_rec_page.recording_duration_seconds - elapsed_seconds;
+    if (remaining == s_rec_page.recording_displayed_remaining) {
+        return;
+    }
+    s_rec_page.recording_displayed_remaining = remaining;
+    char text[12] = {};
+    std::snprintf(text, sizeof(text), "%lus", static_cast<unsigned long>(remaining));
+    set_button_text(s_rec_page.rec_button, text);
+    if (remaining == 0) {
+        s_rec_page.session_state = RecSessionState::FINALIZING;
+        set_record_buttons_enabled(false);
+        set_rec_result_text("Saving REC...", COLOR_WARNING);
+    }
+}
+
 void refresh_settings_ref_button()
 {
     if (!s_rec_page.settings_ref_button) {
@@ -1569,25 +1469,12 @@ void refresh_rec_status_labels()
                              tool->otool_tools.audio.is_es7210_initialized();
 
     if (s_rec_page.status_label) {
-        size_t total = 0;
-        size_t used = 0;
-        const esp_err_t storage_ret = get_rec_storage_info(&total, &used);
-
         char status_buf[160];
-        if (storage_ret == ESP_OK) {
-            const size_t free_bytes = (total > used) ? (total - used) : 0;
-            std::snprintf(status_buf, sizeof(status_buf),
-                          "Storage: %u/%u KB free | Audio: %s | Task: %s",
-                          static_cast<unsigned>(free_bytes / 1024),
-                          static_cast<unsigned>(total / 1024),
-                          audio_ready ? "ready" : "not ready",
-                          rec_session_state_name(s_rec_page.session_state));
-        } else {
-            std::snprintf(status_buf, sizeof(status_buf),
-                          "Storage: not mounted | Audio: %s | Task: %s",
-                          audio_ready ? "ready" : "not ready",
-                          rec_session_state_name(s_rec_page.session_state));
-        }
+        std::snprintf(status_buf, sizeof(status_buf),
+                      "PSRAM REC: %u KB | Audio: %s | Task: %s",
+                      static_cast<unsigned>(s_rec_page.last_record_bytes / 1024),
+                      audio_ready ? "ready" : "not ready",
+                      rec_session_state_name(s_rec_page.session_state));
         set_label_text(s_rec_page.status_label, status_buf);
     }
 
@@ -1738,7 +1625,7 @@ void monitor_task(void* /*param*/)
                                                                      raw_metrics);
 
         const TickType_t now_tick = xTaskGetTickCount();
-        if (metrics_ok &&
+        if (MONITOR_LOG_PERIOD_MS > 0 && metrics_ok &&
             (last_log_tick == 0 ||
              pdTICKS_TO_MS(now_tick - last_log_tick) >= MONITOR_LOG_PERIOD_MS)) {
             MicMonitorStats stats[4] = {};
@@ -1763,6 +1650,38 @@ void waveform_timer_cb(lv_timer_t* /*timer*/)
 {
     if (!s_rec_page.page_alive) {
         return;
+    }
+
+    update_recording_countdown();
+
+    const bool has_record = has_recorded_pcm();
+    if (!s_rec_page.task_running && !s_rec_page.play_running && has_record) {
+        if (s_rec_page.session_state != RecSessionState::RECORDED) {
+            s_rec_page.session_state = RecSessionState::RECORDED;
+        }
+        // The recording worker may finish while the LVGL lock is unavailable.
+        // Re-apply the idle controls from the page timer so PLAY LAST cannot
+        // remain stuck in its disabled black style.
+        if (s_rec_page.play_button &&
+            lv_obj_has_state(s_rec_page.play_button, LV_STATE_DISABLED)) {
+            set_record_buttons_enabled(true);
+        }
+    }
+
+    if (s_rec_page.session_state == RecSessionState::FINALIZING) {
+        return;
+    }
+
+    if (s_rec_page.session_state == RecSessionState::PREPARING_PLAY) {
+        render_recorded_waveform_view(0);
+        update_rec_spectrogram();
+        return;
+    }
+
+    if (s_rec_page.session_state == RecSessionState::PLAYING &&
+        s_rec_page.play_button &&
+        lv_obj_has_state(s_rec_page.play_button, LV_STATE_DISABLED)) {
+        set_record_buttons_enabled(true);
     }
 
     if (s_rec_page.session_state == RecSessionState::RECORDED) {
@@ -1852,16 +1771,10 @@ void rec_task(void* param)
         std::snprintf(result_buf, sizeof(result_buf), "REC failed: device tool not ready");
         ret = ESP_ERR_INVALID_STATE;
     } else {
-        const esp_err_t storage_ret = ensure_rec_storage_mounted();
         const bool audio_ready = tool->otool_tools.audio.is_system_initialized() &&
                                  tool->otool_tools.audio.is_es7210_initialized();
 
-        if (storage_ret != ESP_OK) {
-            std::snprintf(result_buf, sizeof(result_buf),
-                          "REC failed: mount storage %s",
-                          esp_err_to_name(storage_ret));
-            ret = storage_ret;
-        } else if (!audio_ready) {
+        if (!audio_ready) {
             std::snprintf(result_buf, sizeof(result_buf), "REC failed: audio recorder is not ready");
             ret = ESP_ERR_INVALID_STATE;
         } else {
@@ -1872,9 +1785,6 @@ void rec_task(void* param)
             for (int w = 0; w < 20 && s_rec_page.monitor_is_reading; w++) {
                 vTaskDelay(pdMS_TO_TICKS(10));
             }
-
-            char file_path[96];
-            std::snprintf(file_path, sizeof(file_path), "%s", REC_OUTPUT_FILE);
 
             const uint32_t sample_rate = tool->otool_tools.audio.get_sample_rate();
             const int bits = static_cast<int>(tool->otool_tools.audio.get_bits_per_sample());
@@ -1994,93 +1904,36 @@ void rec_task(void* param)
                         } else if (ret == ESP_OK &&
                             recorded_bytes > 0 &&
                             (recorded_bytes >= total_bytes || s_rec_page.stop_requested)) {
-                            size_t storage_total = 0;
-                            size_t storage_used = 0;
-                            ret = get_rec_storage_info(&storage_total, &storage_used);
-                            const size_t storage_free =
-                                (ret == ESP_OK && storage_total > storage_used)
-                                    ? (storage_total - storage_used)
-                                    : 0;
-                            if (ret != ESP_OK) {
-                                std::snprintf(result_buf, sizeof(result_buf),
-                                              "REC failed: storage info %s",
-                                              esp_err_to_name(ret));
-                            } else if (storage_free < recorded_bytes + STORAGE_RESERVE_BYTES) {
-                                std::snprintf(result_buf, sizeof(result_buf),
-                                              "REC failed: storage full need %llu B free %llu B",
-                                              static_cast<unsigned long long>(recorded_bytes),
-                                              static_cast<unsigned long long>(storage_free));
-                                ret = ESP_ERR_NO_MEM;
-                            } else {
-                                FILE* file = fopen(file_path, "wb");
-                                if (!file) {
-                                    const int open_errno = errno;
-                                    std::snprintf(result_buf, sizeof(result_buf),
-                                                  "REC failed: open %s fail (%d:%s)",
-                                                  file_path,
-                                                  open_errno,
-                                                  std::strerror(open_errno));
-                                    ret = ESP_FAIL;
-                                } else {
-                                    size_t bytes_saved = 0;
-                                    while (bytes_saved < recorded_bytes) {
-                                        const size_t remaining = recorded_bytes - bytes_saved;
-                                        const size_t to_write =
-                                            (chunk_size < remaining) ? chunk_size : remaining;
-                                        const size_t written =
-                                            fwrite(rec_buffer + bytes_saved, 1, to_write, file);
-                                        if (written != to_write) {
-                                            ret = ESP_FAIL;
-                                            break;
-                                        }
-                                        bytes_saved += written;
-                                    }
-                                    fflush(file);
-                                    fclose(file);
-
-                                    if (ret == ESP_OK) {
-                                        std::snprintf(s_rec_page.last_path,
-                                                      sizeof(s_rec_page.last_path),
-                                                      "%s",
-                                                      file_path);
-                                        s_rec_page.last_record_bytes = recorded_bytes;
-                                        s_rec_page.last_record_sample_rate = sample_rate;
-                                        s_rec_page.last_record_channels = rec_channels;
-                                        s_rec_page.last_record_bits =
-                                            tool->otool_tools.audio.get_bits_per_sample();
-                                        s_rec_page.playback_duration_ms =
-                                            record_duration_ms_from_bytes(s_rec_page.last_record_bytes,
-                                                                          s_rec_page.last_record_sample_rate,
-                                                                          s_rec_page.last_record_channels,
-                                                                          s_rec_page.last_record_bits);
-                                        const audio_mic_channel_t target_mask =
-                                            static_cast<audio_mic_channel_t>(AUDIO_MIC_CHANNEL_1 |
-                                                                              AUDIO_MIC_CHANNEL_2 |
-                                                                              AUDIO_MIC_CHANNEL_3);
-                                        const audio_mic_channel_t eff_mask =
-                                            static_cast<audio_mic_channel_t>(mic_ch & target_mask);
-                                        build_recorded_wave_preview_from_buffer(rec_buffer,
-                                                                                recorded_bytes,
-                                                                                sample_rate,
-                                                                                s_rec_page.last_record_bits,
-                                                                                is_tdm,
-                                                                                eff_mask);
-                                        std::snprintf(result_buf,
-                                                      sizeof(result_buf),
-                                                      "%s | %llu B | %s",
-                                                      "REC done",
-                                                      static_cast<unsigned long long>(recorded_bytes),
-                                                      file_path);
-                                        result_color = COLOR_SUCCESS;
-                                    } else {
-                                        std::snprintf(result_buf,
-                                                      sizeof(result_buf),
-                                                      "REC failed: save %llu/%llu B",
-                                                      static_cast<unsigned long long>(bytes_saved),
-                                                      static_cast<unsigned long long>(recorded_bytes));
-                                    }
-                                }
-                            }
+                            s_rec_page.recorded_pcm = rec_buffer;
+                            rec_buffer = nullptr;
+                            s_rec_page.last_record_bytes = recorded_bytes;
+                            s_rec_page.last_record_sample_rate = sample_rate;
+                            s_rec_page.last_record_channels = rec_channels;
+                            s_rec_page.last_record_bits =
+                                tool->otool_tools.audio.get_bits_per_sample();
+                            s_rec_page.last_record_tdm = is_tdm;
+                            s_rec_page.playback_duration_ms =
+                                record_duration_ms_from_bytes(s_rec_page.last_record_bytes,
+                                                              s_rec_page.last_record_sample_rate,
+                                                              s_rec_page.last_record_channels,
+                                                              s_rec_page.last_record_bits);
+                            const audio_mic_channel_t target_mask =
+                                static_cast<audio_mic_channel_t>(AUDIO_MIC_CHANNEL_1 |
+                                                                  AUDIO_MIC_CHANNEL_2 |
+                                                                  AUDIO_MIC_CHANNEL_3);
+                            const audio_mic_channel_t eff_mask =
+                                static_cast<audio_mic_channel_t>(mic_ch & target_mask);
+                            build_recorded_wave_preview_from_buffer(s_rec_page.recorded_pcm,
+                                                                    recorded_bytes,
+                                                                    sample_rate,
+                                                                    s_rec_page.last_record_bits,
+                                                                    is_tdm,
+                                                                    eff_mask);
+                            std::snprintf(result_buf,
+                                          sizeof(result_buf),
+                                          "REC ready in PSRAM | %llu B",
+                                          static_cast<unsigned long long>(recorded_bytes));
+                            result_color = COLOR_SUCCESS;
                         } else if (ret == ESP_OK && s_rec_page.stop_requested) {
                             std::snprintf(result_buf, sizeof(result_buf), "REC stopped: no data saved");
                             ret = ESP_ERR_INVALID_SIZE;
@@ -2094,7 +1947,9 @@ void rec_task(void* param)
                             ret = ESP_ERR_INVALID_SIZE;
                         }
                     }
-                    heap_caps_free(rec_buffer);
+                    if (rec_buffer) {
+                        heap_caps_free(rec_buffer);
+                    }
                 }
             }
         }
@@ -2106,15 +1961,16 @@ void rec_task(void* param)
         ESP_LOGW(TAG, "REC task failed: %s", result_buf);
     } else {
         s_rec_page.session_state =
-            (s_rec_page.last_record_bytes > 0 && s_rec_page.last_path[0] != '\0')
-                ? RecSessionState::RECORDED
-                : RecSessionState::IDLE;
+            has_recorded_pcm() ? RecSessionState::RECORDED : RecSessionState::IDLE;
         ESP_LOGI(TAG, "REC task done: %s", result_buf);
     }
 
     s_rec_page.task_running = false;
     s_rec_page.stop_requested = false;
     s_rec_page.discard_record_requested = false;
+    s_rec_page.recording_start_tick = 0;
+    s_rec_page.recording_duration_seconds = 0;
+    s_rec_page.recording_displayed_remaining = UINT32_MAX;
     update_rec_ui_from_task(result_buf, result_color);
 
     delete action;
@@ -2129,7 +1985,7 @@ void update_rec_ui_from_play_task(const char* result_text, uint32_t result_color
     }
 
     if (s_rec_page.page_alive) {
-        if (s_rec_page.last_record_bytes > 0 && s_rec_page.last_path[0] != '\0') {
+        if (has_recorded_pcm()) {
             s_rec_page.session_state = RecSessionState::RECORDED;
             s_rec_page.playback_wave_active = false;
             render_recorded_waveform_view(0);
@@ -2161,79 +2017,86 @@ void rec_play_task(void* /*param*/)
         !tool->otool_tools.audio.is_es8311_initialized()) {
         std::snprintf(result_buf, sizeof(result_buf), "PLAY failed: audio playback is not ready");
         ret = ESP_ERR_INVALID_STATE;
-    } else if (s_rec_page.last_record_bytes == 0 || s_rec_page.last_path[0] == '\0') {
+    } else if (!has_recorded_pcm()) {
         std::snprintf(result_buf, sizeof(result_buf), "PLAY failed: no recording");
         ret = ESP_ERR_NOT_FOUND;
     } else {
-        FILE* file = fopen(s_rec_page.last_path, "rb");
-        if (!file) {
-            const int open_errno = errno;
-            std::snprintf(result_buf, sizeof(result_buf),
-                          "PLAY failed: open %s (%d:%s)",
-                          s_rec_page.last_path,
-                          open_errno,
-                          std::strerror(open_errno));
-            ret = ESP_FAIL;
+        const uint8_t* buffer = s_rec_page.recorded_pcm;
+        const size_t bytes_read = s_rec_page.last_record_bytes;
+        if (s_rec_page.stop_play_requested) {
+            std::snprintf(result_buf, sizeof(result_buf), "PLAY stopped");
+            ret = ESP_ERR_INVALID_STATE;
         } else {
-            uint8_t* buffer = static_cast<uint8_t*>(
-                heap_caps_malloc(s_rec_page.last_record_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-            if (!buffer) {
-                buffer = static_cast<uint8_t*>(
-                    heap_caps_malloc(s_rec_page.last_record_bytes, MALLOC_CAP_8BIT));
+            auto* pb = tool->otool_tools.audio.get_playback();
+            const uint8_t* playback_data = buffer;
+            size_t playback_bytes = bytes_read;
+            audio_channels_t playback_channels = s_rec_page.last_record_channels;
+            i2s_data_bit_width_t playback_bits = s_rec_page.last_record_bits;
+            uint8_t* converted_pcm = nullptr;
+            if (s_rec_page.last_record_tdm) {
+                if (build_playable_pcm_from_tdm(buffer,
+                                               bytes_read,
+                                               converted_pcm,
+                                               playback_bytes)) {
+                    playback_data = converted_pcm;
+                    playback_channels = AUDIO_CHANNELS_STEREO;
+                    playback_bits = I2S_DATA_BIT_WIDTH_16BIT;
+                } else {
+                    std::snprintf(result_buf, sizeof(result_buf),
+                                  "PLAY failed: invalid TDM recording");
+                    ret = ESP_ERR_INVALID_SIZE;
+                }
             }
 
-            if (!buffer) {
-                std::snprintf(result_buf, sizeof(result_buf),
-                              "PLAY failed: no memory (%llu B)",
-                              static_cast<unsigned long long>(s_rec_page.last_record_bytes));
-                ret = ESP_ERR_NO_MEM;
-            } else {
-                const size_t bytes_read = fread(buffer, 1, s_rec_page.last_record_bytes, file);
-                if (bytes_read == 0) {
-                    std::snprintf(result_buf, sizeof(result_buf), "PLAY failed: empty file");
-                    ret = ESP_ERR_INVALID_SIZE;
-                } else if (s_rec_page.stop_play_requested) {
-                    std::snprintf(result_buf, sizeof(result_buf), "PLAY stopped");
-                    ret = ESP_ERR_INVALID_STATE;
+            if (converted_pcm || !s_rec_page.last_record_tdm) {
+                const esp_err_t pa_ret = tool->otool_tools.audio.set_pa_power(true);
+                if (pa_ret != ESP_OK) {
+                    std::snprintf(result_buf, sizeof(result_buf),
+                                  "PLAY failed: PA %s", esp_err_to_name(pa_ret));
+                    ret = pa_ret;
                 } else {
-                    auto* pb = tool->otool_tools.audio.get_playback();
-                    ret = pb ? pb->play_audio_buffer(buffer,
-                                                     bytes_read,
+                    for (int w = 0; w < 20 && s_rec_page.monitor_is_reading; ++w) {
+                        vTaskDelay(pdMS_TO_TICKS(10));
+                    }
+                    ret = pb ? pb->play_audio_buffer(playback_data,
+                                                     playback_bytes,
                                                      s_rec_page.last_record_sample_rate,
-                                                     s_rec_page.last_record_channels,
-                                                     s_rec_page.last_record_bits,
+                                                     playback_channels,
+                                                     playback_bits,
                                                      AUDIO_PLAYBACK_ASYNC)
                              : ESP_ERR_INVALID_STATE;
-                    if (ret == ESP_OK && pb) {
-                        s_rec_page.playback_start_tick = xTaskGetTickCount();
-                        s_rec_page.playback_wave_active = true;
-                        while (pb->is_async_playback_running()) {
-                            if (!s_rec_page.page_alive || s_rec_page.stop_play_requested) {
-                                pb->stop_async_playback();
-                                break;
-                            }
-                            vTaskDelay(pdMS_TO_TICKS(50));
-                        }
-
-                        if (s_rec_page.stop_play_requested) {
-                            std::snprintf(result_buf, sizeof(result_buf), "PLAY stopped");
-                            result_color = COLOR_WARNING;
-                            ret = ESP_ERR_INVALID_STATE;
-                        } else {
-                            std::snprintf(result_buf, sizeof(result_buf),
-                                          "PLAY done | %llu B",
-                                          static_cast<unsigned long long>(bytes_read));
-                            result_color = COLOR_SUCCESS;
-                        }
-                    } else {
-                        std::snprintf(result_buf, sizeof(result_buf),
-                                      "PLAY failed: %s",
-                                      esp_err_to_name(ret));
-                    }
                 }
-                heap_caps_free(buffer);
             }
-            fclose(file);
+            if (ret == ESP_OK && pb) {
+                s_rec_page.session_state = RecSessionState::PLAYING;
+                s_rec_page.playback_start_tick = xTaskGetTickCount();
+                s_rec_page.playback_wave_active = true;
+                while (pb->is_async_playback_running()) {
+                    if (!s_rec_page.page_alive || s_rec_page.stop_play_requested) {
+                        pb->stop_async_playback();
+                        break;
+                    }
+                    vTaskDelay(pdMS_TO_TICKS(50));
+                }
+
+                if (s_rec_page.stop_play_requested) {
+                    std::snprintf(result_buf, sizeof(result_buf), "PLAY stopped");
+                    result_color = COLOR_WARNING;
+                    ret = ESP_ERR_INVALID_STATE;
+                } else {
+                    std::snprintf(result_buf, sizeof(result_buf),
+                                  "PLAY done | %llu B",
+                                  static_cast<unsigned long long>(bytes_read));
+                    result_color = COLOR_SUCCESS;
+                }
+            } else {
+                std::snprintf(result_buf, sizeof(result_buf),
+                              "PLAY failed: %s",
+                              esp_err_to_name(ret));
+            }
+            if (converted_pcm) {
+                heap_caps_free(converted_pcm);
+            }
         }
     }
 
@@ -2289,8 +2152,7 @@ void start_rec_action(const RecAction& action)
         end_rec_to_initial_state();
         return;
     }
-    if (s_rec_page.session_state != RecSessionState::IDLE ||
-        s_rec_page.last_record_bytes > 0) {
+    if (s_rec_page.session_state != RecSessionState::IDLE || has_recorded_pcm()) {
         end_rec_to_initial_state();
         return;
     }
@@ -2299,10 +2161,14 @@ void start_rec_action(const RecAction& action)
     s_rec_page.stop_requested = false;
     s_rec_page.discard_record_requested = false;
     s_rec_page.session_state = RecSessionState::RECORDING;
+    s_rec_page.recording_start_tick = xTaskGetTickCount();
+    s_rec_page.recording_duration_seconds =
+        action.duration_seconds > REC_MAX_SECONDS ? REC_MAX_SECONDS : action.duration_seconds;
     s_rec_page.sequence++;
     clear_rec_spectrogram(true);
     clear_rec_waveforms();
     set_record_buttons_enabled(false);
+    update_recording_countdown();
     refresh_rec_status_labels();
 
     char running_buf[160];
@@ -2341,6 +2207,22 @@ void rec_button_event_cb(lv_event_t* e)
         return;
     }
 
+    if (s_rec_page.task_running) {
+        // END REC must finalize the current recording. The previous path called
+        // end_rec_to_initial_state(), which set discard_record_requested and
+        // deleted the captured file, leaving PLAY LAST permanently unavailable.
+        s_rec_page.discard_record_requested = false;
+        s_rec_page.stop_requested = true;
+        s_rec_page.session_state = RecSessionState::FINALIZING;
+        set_record_buttons_enabled(false);
+        set_rec_result_text("Finalizing REC...", COLOR_WARNING);
+        return;
+    }
+
+    if (has_recorded_pcm()) {
+        end_rec_to_initial_state();
+    }
+
     RecAction action = {REC_MAX_SECONDS};
     start_rec_action(action);
 }
@@ -2365,23 +2247,20 @@ void play_button_event_cb(lv_event_t* e)
         return;
     }
 
-    if (s_rec_page.task_running ||
-        s_rec_page.session_state != RecSessionState::RECORDED ||
-        s_rec_page.last_record_bytes == 0 ||
-        s_rec_page.last_path[0] == '\0') {
+    if (s_rec_page.task_running || !has_recorded_pcm()) {
         return;
     }
 
     s_rec_page.play_running = true;
     s_rec_page.stop_play_requested = false;
-    s_rec_page.session_state = RecSessionState::PLAYING;
+    s_rec_page.session_state = RecSessionState::PREPARING_PLAY;
     s_rec_page.playback_duration_ms =
         record_duration_ms_from_bytes(s_rec_page.last_record_bytes,
                                       s_rec_page.last_record_sample_rate,
                                       s_rec_page.last_record_channels,
                                       s_rec_page.last_record_bits);
-    s_rec_page.playback_start_tick = xTaskGetTickCount();
-    s_rec_page.playback_wave_active = true;
+    s_rec_page.playback_start_tick = 0;
+    s_rec_page.playback_wave_active = false;
     s_rec_page.display_mode = RecDisplayMode::WAVEFORM;
     apply_rec_display_mode();
     render_recorded_waveform_view(0);
@@ -2521,6 +2400,17 @@ void rec_content_delete_event_cb(lv_event_t* e)
     s_rec_page.monitor_active = false;
     s_rec_page.stop_requested = true;
     s_rec_page.stop_play_requested = true;
+    if (s_rec_page.play_running) {
+        auto* tool = corep4_ui_sync_get_tool();
+        auto* pb = tool ? tool->otool_tools.audio.get_playback() : nullptr;
+        if (pb && pb->is_async_playback_running()) {
+            const esp_err_t stop_ret = pb->stop_async_playback();
+            if (stop_ret != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to stop REC playback on window close: %s",
+                         esp_err_to_name(stop_ret));
+            }
+        }
+    }
     corep4_ui_close_function_dialog(&s_rec_page.settings_dialog);
     s_rec_page.settings_ref_button = nullptr;
 
@@ -2577,13 +2467,14 @@ void build_content(lv_obj_t* parent, const CoreP4FunctionWindowConfig& config)
     lv_obj_add_event_cb(parent, rec_content_delete_event_cb, LV_EVENT_DELETE, nullptr);
 
     auto* tool = corep4_ui_sync_get_tool();
-    ensure_rec_storage_mounted();
     if (s_rec_page.task_running) {
         s_rec_page.session_state = RecSessionState::RECORDING;
     } else if (s_rec_page.play_running) {
-        s_rec_page.session_state = RecSessionState::PLAYING;
+        s_rec_page.session_state = RecSessionState::PREPARING_PLAY;
+    } else if (has_recorded_pcm()) {
+        s_rec_page.session_state = RecSessionState::RECORDED;
     } else {
-        restore_record_file_from_storage();
+        s_rec_page.session_state = RecSessionState::IDLE;
     }
 
     // ---- 默认显示：MIC Monitor 单屏波形 ----
@@ -2744,10 +2635,11 @@ void build_content(lv_obj_t* parent, const CoreP4FunctionWindowConfig& config)
             lv_obj_set_style_text_color(s_rec_page.result_label, lv_color_hex(COLOR_WARNING), LV_PART_MAIN);
         }
     } else if (s_rec_page.session_state == RecSessionState::RECORDED &&
-               s_rec_page.last_path[0] != '\0') {
+               has_recorded_pcm()) {
         render_recorded_waveform_view(0);
         char last_buf[160];
-        std::snprintf(last_buf, sizeof(last_buf), "Last REC ready: %s", s_rec_page.last_path);
+        std::snprintf(last_buf, sizeof(last_buf), "Last REC ready in PSRAM: %llu B",
+                      static_cast<unsigned long long>(s_rec_page.last_record_bytes));
         set_rec_result_text(last_buf, COLOR_SUCCESS);
     } else {
         clear_rec_waveforms();

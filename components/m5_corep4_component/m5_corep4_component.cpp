@@ -3003,9 +3003,6 @@ esp_err_t m5_corep4_tool::start_lvgl_custom_demo(void)
         return ESP_OK;
     }
 
-    // 等待LVGL完全初始化
-    vTaskDelay(pdMS_TO_TICKS(100));
-    
     // 尝试获取LVGL锁，增加超时时间到1秒，并添加重试机制
     int retry_count = 3;
     bool lock_acquired = false;

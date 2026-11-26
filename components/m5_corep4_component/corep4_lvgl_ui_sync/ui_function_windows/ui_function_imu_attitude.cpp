@@ -19,6 +19,7 @@ constexpr float STATIONARY_ACCEL_FRACTION = 0.10f;
 // calibration window. The previous 12-sample window finished in ~120 ms,
 // which was too short to produce a stable gyro-bias estimate.
 constexpr unsigned GYRO_BIAS_BOOTSTRAP_SAMPLES = 60;
+constexpr unsigned GYRO_BIAS_CALIBRATION_TIMEOUT_SAMPLES = 300;
 constexpr float GYRO_BIAS_ALPHA = 0.003f;
 constexpr float INTEGRAL_ERROR_LIMIT = 0.08f;
 constexpr float INTEGRAL_ERROR_DECAY = 0.98f;
@@ -85,6 +86,7 @@ void CoreP4ImuAttitude::reset() {
   gyro_bias_dps_[2] = 0.0f;
   gravity_norm_ = 0.0f;
   gyro_bias_samples_ = 0;
+  calibration_attempts_ = 0;
   ready_ = false;
 }
 
@@ -132,6 +134,10 @@ bool CoreP4ImuAttitude::update(float acc_x, float acc_y, float acc_z,
   }
 
   if (!gyroscope_valid) {
+    ++calibration_attempts_;
+    if (calibration_attempts_ >= GYRO_BIAS_CALIBRATION_TIMEOUT_SAMPLES) {
+      gyro_bias_samples_ = GYRO_BIAS_BOOTSTRAP_SAMPLES;
+    }
     return ready_;
   }
 
@@ -160,17 +166,19 @@ bool CoreP4ImuAttitude::update(float acc_x, float acc_y, float acc_z,
       acceleration_stationary &&
       corrected_gyro_norm < TRACKING_STATIONARY_GYRO_DPS;
   if (!calibrated()) {
+    ++calibration_attempts_;
     if (bootstrap_stationary) {
       ++gyro_bias_samples_;
       const float sample_weight = 1.0f / gyro_bias_samples_;
       gyro_bias_dps_[0] += (gyr_x_dps - gyro_bias_dps_[0]) * sample_weight;
       gyro_bias_dps_[1] += (gyr_y_dps - gyro_bias_dps_[1]) * sample_weight;
       gyro_bias_dps_[2] += (gyr_z_dps - gyro_bias_dps_[2]) * sample_weight;
-    } else {
-      gyro_bias_samples_ = 0;
-      gyro_bias_dps_[0] = 0.0f;
-      gyro_bias_dps_[1] = 0.0f;
-      gyro_bias_dps_[2] = 0.0f;
+    }
+    // Do not reset progress on a single vibration spike. If the sensor never
+    // reaches the full stationary window, finish after three seconds so the
+    // UI cannot remain stuck on "Calibrating IMU..." forever.
+    if (calibration_attempts_ >= GYRO_BIAS_CALIBRATION_TIMEOUT_SAMPLES) {
+      gyro_bias_samples_ = GYRO_BIAS_BOOTSTRAP_SAMPLES;
     }
   } else if (tracking_stationary) {
     gyro_bias_dps_[0] += (gyr_x_dps - gyro_bias_dps_[0]) * GYRO_BIAS_ALPHA;

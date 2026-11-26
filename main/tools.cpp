@@ -114,6 +114,23 @@ void ethernet_wait_task(void *arg)
     vTaskDelete(nullptr);
 }
 
+void esp_hosted_reset_task(void *arg)
+{
+    auto *tool = static_cast<m5_corep4_tool *>(arg);
+    if (tool == nullptr) {
+        ESP_LOGE(TAG, "ESP-Hosted reset task got null tool");
+        vTaskDelete(nullptr);
+        return;
+    }
+
+    esp_err_t ret = tool->esp_hosted_manual_reset();
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Background ESP-Hosted reset failed: %s", esp_err_to_name(ret));
+    }
+
+    vTaskDelete(nullptr);
+}
+
 struct StartupPromptSoundTaskContext {
     m5_corep4_tool *tool;
     uint32_t delay_ms;
@@ -313,6 +330,18 @@ void start_ethernet_wait_task(m5_corep4_tool &tool)
     BaseType_t task_ret = xTaskCreate(ethernet_wait_task, "eth_wait", 4096, &tool, 5, nullptr);
     if (task_ret != pdPASS) {
         ESP_LOGE(TAG, "Failed to create Ethernet wait task");
+    }
+}
+
+void start_esp_hosted_reset_task(m5_corep4_tool &tool)
+{
+    BaseType_t task_ret = xTaskCreate(esp_hosted_reset_task, "hosted_reset", 4096, &tool, 5, nullptr);
+    if (task_ret != pdPASS) {
+        ESP_LOGW(TAG, "Failed to create ESP-Hosted reset task; running reset synchronously");
+        esp_err_t ret = tool.esp_hosted_manual_reset();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Synchronous ESP-Hosted reset failed: %s", esp_err_to_name(ret));
+        }
     }
 }
 

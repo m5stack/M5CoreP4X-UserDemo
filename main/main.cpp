@@ -79,6 +79,10 @@ extern "C" void app_main(void)
     // 打开 PYB -> L3B电源
     corep4.set_status(StatusParam::POWER_PYB_L3B, true);
 
+    // C6/L3B 已上电，复位序列放到后台执行，避免 1.3s 固定等待阻塞
+    // 音频和显示启动。该任务只操作 GPIO42，可与后续初始化并行。
+    start_esp_hosted_reset_task(corep4);
+
     // 设置 PYB -> CORE-P4 USBA 5v输出为开启
     corep4.set_status(StatusParam::POWER_PYB_USBA, false);
     vTaskDelay(200 / portTICK_PERIOD_MS);
@@ -104,10 +108,59 @@ extern "C" void app_main(void)
     // 打开充电 -> PYB 供电，并设置充电电流为180mA
     corep4.set_status(StatusParam::POWER_CHARGE_CURRENT, static_cast<uint8_t>(CHARGE_CURRENT_180MA));
 
-    // ESP-Hosted WiFi 模块复位
-    esp_err_t wifi_reset_ret = corep4.esp_hosted_manual_reset();
-    if (wifi_reset_ret != ESP_OK) {
-        ESP_LOGW(TAG, "Startup WiFi module reset failed: %s", esp_err_to_name(wifi_reset_ret));
+    // -------------------- AUDIO (ES8311 DAC + ES7210 ADC) --------------------
+    // 音频只依赖 I2C/I2S 和音频电源，提前于 LCD 初始化，让 PA 的 500ms
+    // 稳定时间与显示初始化重叠；提示音在 UI 就绪后立即播放。
+    corep4.otool_tools.audio.set_i2s_pin_config(Pin_P4_I2S_BCLK_PIN, Pin_P4_I2S_MCLK_PIN, Pin_P4_I2S_DATA_IN_PIN,
+                                                Pin_P4_I2S_DATA_OUT_PIN, Pin_P4_I2S_DATA_WS_PIN, Pin_P4_I2S_PWR_EN);
+    esp_err_t audio_ret =
+        corep4.otool_tools.audio.audio_system_init(corep4.otool_tools.i2c_tools.get_i2c_master_bus_handle(), I2S_NUM_0,
+                                                   AUDIO_SAMPLE_RATE_16K, I2S_DATA_BIT_WIDTH_32BIT);
+    bool audio_ready = false;
+    if (audio_ret == ESP_OK) {
+        corep4.otool_tools.audio.es8311_init(AUDIO_CHANNELS_STEREO, ES8311_MODE_DAC);
+        // ES7210 必须启用 TDM 模式，使用单麦克风通道减少 RX DMA 负载
+        corep4.otool_tools.audio.es7210_init(AUDIO_CHANNELS_STEREO, AUDIO_MIC_CHANNEL_ALL, ES7210_TDM_ENABLED);
+        corep4.otool_tools.audio.set_volume(80.0);
+        corep4.otool_tools.audio.set_record_gain(30.0);
+        // DAC 输出稳定后再异步开功放，消除启动噪声
+        corep4.otool_tools.audio.enable_pa_after_delay(500);
+        // 增益
+        corep4.otool_tools.audio.es7210_set_mic_channel_gain(AUDIO_MIC_CHANNEL_1, ES7210_MIC_GAIN_27DB);
+        corep4.otool_tools.audio.es7210_set_mic_channel_gain(AUDIO_MIC_CHANNEL_2, ES7210_MIC_GAIN_27DB);
+        corep4.otool_tools.audio.es7210_set_mic_channel_gain(AUDIO_MIC_CHANNEL_3, ES7210_MIC_GAIN_33DB);
+        corep4.otool_tools.audio.es7210_set_mic_channel_gain(AUDIO_MIC_CHANNEL_4, ES7210_MIC_GAIN_27DB);
+
+        // 禁音
+        corep4.otool_tools.audio.es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_1, false);
+        corep4.otool_tools.audio.es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_2, false);
+        corep4.otool_tools.audio.es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_3, false);
+        corep4.otool_tools.audio.es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_4, false);
+        audio_ready = true;
+        ESP_LOGI(TAG, "Audio system initialized successfully");
+    } else {
+        ESP_LOGE(TAG, "Audio system init failed: %s", esp_err_to_name(audio_ret));
+    }
+
+    // -------------------- LCD、触摸和 LVGL 优先初始化 --------------------
+    // Display/UI startup is on the critical path. Initialize it before slower
+    // SD, RTC and Ethernet work so the operator sees the UI as early as possible;
+    // audio and ESP-Hosted reset are already running in parallel above.
+    corep4.set_lcd_power(true);
+    corep4.reset_lcd();
+    corep4.reset_touch();
+    corep4.lcd_init();
+    corep4.touch_init();
+    vTaskDelay(pdMS_TO_TICKS(20));
+    corep4.set_status(StatusParam::POWER_LCD_BRIGHTNESS, static_cast<uint8_t>(100));
+    corep4.lcd_clear(false);
+    corep4.lvgl_init();
+    corep4.set_lvgl_rotation(LV_DISPLAY_ROTATION_180);
+    corep4.start_lvgl_custom_demo();
+
+    // UI 已可交互，立即播放提示音；PA 已在显示初始化期间完成 500ms 稳定等待。
+    if (audio_ready) {
+        play_startup_prompt_sound(corep4, 0);
     }
 
     // -------------------- 外设 初始化 ----------------
@@ -157,40 +210,6 @@ extern "C" void app_main(void)
         }
     }
 
-    // 初始化 AUDIO (ES8311 DAC + ES7210 ADC)
-    corep4.otool_tools.audio.set_i2s_pin_config(Pin_P4_I2S_BCLK_PIN, Pin_P4_I2S_MCLK_PIN, Pin_P4_I2S_DATA_IN_PIN,
-                                                Pin_P4_I2S_DATA_OUT_PIN, Pin_P4_I2S_DATA_WS_PIN, Pin_P4_I2S_PWR_EN);
-    esp_err_t audio_ret =
-        corep4.otool_tools.audio.audio_system_init(corep4.otool_tools.i2c_tools.get_i2c_master_bus_handle(), I2S_NUM_0,
-                                                   AUDIO_SAMPLE_RATE_16K, I2S_DATA_BIT_WIDTH_32BIT);
-    if (audio_ret == ESP_OK) {
-        corep4.otool_tools.audio.es8311_init(AUDIO_CHANNELS_STEREO, ES8311_MODE_DAC);
-        // ES7210 必须启用 TDM 模式，使用单麦克风通道减少 RX DMA 负载
-        corep4.otool_tools.audio.es7210_init(AUDIO_CHANNELS_STEREO, AUDIO_MIC_CHANNEL_ALL, ES7210_TDM_ENABLED);
-        corep4.otool_tools.audio.set_volume(80.0);
-        corep4.otool_tools.audio.set_record_gain(30.0);
-        // DAC 输出稳定后再异步开功放，消除启动噪声
-        corep4.otool_tools.audio.enable_pa_after_delay(500);
-        // 增益
-        corep4.otool_tools.audio.es7210_set_mic_channel_gain(AUDIO_MIC_CHANNEL_1, ES7210_MIC_GAIN_27DB);
-        corep4.otool_tools.audio.es7210_set_mic_channel_gain(AUDIO_MIC_CHANNEL_2, ES7210_MIC_GAIN_27DB);
-        corep4.otool_tools.audio.es7210_set_mic_channel_gain(AUDIO_MIC_CHANNEL_3, ES7210_MIC_GAIN_33DB);
-        corep4.otool_tools.audio.es7210_set_mic_channel_gain(AUDIO_MIC_CHANNEL_4, ES7210_MIC_GAIN_27DB);
-
-        // 禁音
-        corep4.otool_tools.audio.es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_1, false);
-        corep4.otool_tools.audio.es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_2, false);
-        corep4.otool_tools.audio.es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_3, false);
-        corep4.otool_tools.audio.es7210_set_mic_channel_mute(AUDIO_MIC_CHANNEL_4, false);
-        ESP_LOGI(TAG, "Audio system initialized successfully");
-
-        // Startup 提示音
-        corep4.set_startup_prompt_audio_delay_ms(1000);
-        play_startup_prompt_sound(corep4, corep4.get_startup_prompt_audio_delay_ms());
-    } else {
-        ESP_LOGE(TAG, "Audio system init failed: %s", esp_err_to_name(audio_ret));
-    }
-
     // -------------------- 以太网 初始化 ----------------
     // // 检测以太网PHY芯片 (IP101)
     ESP_LOGI(TAG, "Detecting Ethernet PHY chip...");
@@ -230,28 +249,6 @@ extern "C" void app_main(void)
         corep4.set_status(StatusParam::ETH_INITIALIZED, false,
                           StatusConfigFlag::UPDATE_STATUS | StatusConfigFlag::SYNC_UI);
     }
-
-    // -------------------- LCD 和触摸屏 初始化 ----------------
-    // LCD 初始化和测试
-    corep4.set_lcd_power(true);            // 打开 LCD 电源
-    corep4.reset_lcd();                    // LCD 复位序列
-    corep4.reset_touch();                  // 触摸复位序列
-    corep4.lcd_init();                     // 初始化LCD
-    corep4.touch_init();                   // 初始化触摸屏
-    vTaskDelay(100 / portTICK_PERIOD_MS);  // 等待LCD稳定
-    corep4.set_status(StatusParam::POWER_LCD_BRIGHTNESS, static_cast<uint8_t>(100));
-    corep4.lcd_clear(false);  // 清屏为黑色
-
-    // corep4.touch_test_demo(); // 触摸测试 - 支持多点触摸轨迹显示
-    // corep4.lcd_draw_rainbow_stripes(corep4.get_lcd_panel_handle(), 480, 480, true); //
-    // 显示彩虹条测试屏，并全屏显示每种颜色
-
-    corep4.lvgl_init();                                 // 初始化LVGL
-    corep4.set_lvgl_rotation(LV_DISPLAY_ROTATION_180);  // 设置LVGL旋转180度
-
-    // corep4.start_lvgl_benchmark_demo(); // 启动LVGL基准测试演示
-    // corep4.start_lvgl_music_demo(); // 启动LVGL音乐播放器演示
-    corep4.start_lvgl_custom_demo();  // 启动自定义LVGL界面（内部已初始化UI同步模块）
 
     // //检查测试音频文件是否可用，播放 AUDIO_FILE_CANDY_WIND_2CH_16K_16B_9S
     // auto* pb = corep4.otool_tools.audio.get_playback();

@@ -804,6 +804,19 @@ void music_content_delete_event_cb(lv_event_t* e)
         s_music_page.timer = nullptr;
     }
 
+    s_music_page.stop_requested = true;
+    if (s_music_page.owns_playback) {
+        auto* tool = corep4_ui_sync_get_tool();
+        auto* pb = tool ? tool->otool_tools.audio.get_playback() : nullptr;
+        if (pb && pb->is_async_playback_running()) {
+            const esp_err_t stop_ret = pb->stop_async_playback();
+            if (stop_ret != ESP_OK) {
+                ESP_LOGW(TAG, "Failed to stop Music playback on window close: %s",
+                         esp_err_to_name(stop_ret));
+            }
+        }
+    }
+
     s_music_page.page_alive = false;
     s_music_page.owns_playback = false;
     s_music_page.track_available_known = false;
